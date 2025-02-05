@@ -6,14 +6,15 @@ services:
     container_name: questions-service
     restart: always
     environment:
-      - MONGO_URI=mongodb://mongo:27017/questions-db
+      - MONGO_URI=mongodb://questions-mongo:27017/questions
     depends_on:
       - questions-mongo
 
   questions-mongo:
     image: mongo:latest
     container_name: questions-mongo
-    restart: always
+    environment:
+      - MONGO_INITDB_DATABASE=questions
     volumes:
       - questions_db:/data/db
 
