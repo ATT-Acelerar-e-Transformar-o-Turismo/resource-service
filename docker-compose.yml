@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  questions-service:
+    build: .
+    container_name: questions-service
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/questions-db
+    depends_on:
+      - questions-mongo
+
+  questions-mongo:
+    image: mongo:latest
+    container_name: questions-mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - questions_db:/data/db
+
+volumes:
+  questions_db:
+
