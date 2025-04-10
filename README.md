@@ -1,4 +1,4 @@
-# resouce-service
+# questions-service
 
 ## A service using FastAPI and MongoDB
 

@@ -1,23 +1,21 @@
-version: "3.8"
-
 services:
-  questions-service:
+  resource-service:
     build: .
-    container_name: questions-service
+    container_name: resource-service
     restart: always
     environment:
-      - MONGO_URI=mongodb://questions-mongo:27017/questions
+      - MONGO_URI=mongodb://resource-mongo:27017/resources
     depends_on:
-      - questions-mongo
+      - resource-mongo
 
-  questions-mongo:
+  resource-mongo:
     image: mongo:latest
-    container_name: questions-mongo
+    container_name: resource-mongo
     environment:
-      - MONGO_INITDB_DATABASE=questions
+      - MONGO_INITDB_DATABASE=resources
     volumes:
-      - questions_db:/data/db
+      - resource_db:/data/db
 
 volumes:
-  questions_db:
+  resource_db:
 
