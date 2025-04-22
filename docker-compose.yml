@@ -3,6 +3,8 @@ services:
     build: .
     container_name: resource-service
     restart: always
+    networks:
+      - att-network
     environment:
       - MONGO_URI=mongodb://resource-mongo:27017/resources
     depends_on:
