@@ -17,6 +17,8 @@ services:
       - MONGO_INITDB_DATABASE=resources
     volumes:
       - resource_db:/data/db
+    networks:
+      - att-network
 
 volumes:
   resource_db:
