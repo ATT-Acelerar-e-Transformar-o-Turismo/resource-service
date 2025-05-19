@@ -3,8 +3,6 @@ services:
     build: .
     container_name: resource-service
     restart: always
-    networks:
-      - att-network
     environment:
       - MONGO_URI=mongodb://resource-mongo:27017/resources
     depends_on:
@@ -17,8 +15,12 @@ services:
       - MONGO_INITDB_DATABASE=resources
     volumes:
       - resource_db:/data/db
-    networks:
-      - att-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 6s
+      timeout: 5s
+      retries: 5
+      start_period: 6s
 
 volumes:
   resource_db:
