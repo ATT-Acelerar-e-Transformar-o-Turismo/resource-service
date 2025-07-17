@@ -3,3 +3,4 @@ motor
 fastapi
 uvicorn
 python-dotenv
+aio-pika
