@@ -1,13 +1,14 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from schemas.common import PyObjectId
+from schemas.data_segment import DataPoint
 
 
 class ResourceBase(BaseModel):
+    wrapper_id: str
     name: str
-    startPeriod: datetime
-    endPeriod: datetime
+    type: str
 
 
 class ResourceCreate(ResourceBase):
@@ -20,17 +21,23 @@ class ResourceUpdate(ResourceBase):
 
 class ResourcePatch(BaseModel):
     name: Optional[str] = None
-    startPeriod: Optional[datetime] = None
-    endPeriod: Optional[datetime] = None
+    type: Optional[str] = None
 
 
 class Resource(ResourceBase):
     id: PyObjectId
+    startPeriod: Optional[datetime] = None
+    endPeriod: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ResourceDelete(BaseModel):
     id: str
     deleted: bool
+
+
+class ResourceData(BaseModel):
+    resource_id: PyObjectId
+    data: List[DataPoint]

@@ -2,6 +2,6 @@ from fastapi import APIRouter
 
 router = APIRouter()
 
-@router.get("/health")
+@router.get("/")
 def read_root():
     return {"message": "Hello from resource service!"} 

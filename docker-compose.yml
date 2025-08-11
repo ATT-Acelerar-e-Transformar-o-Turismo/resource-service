@@ -5,8 +5,26 @@ services:
     restart: always
     environment:
       - MONGO_URI=mongodb://resource-mongo:27017/resources
+      - ORIGINS=${ORIGINS:-localhost}
     depends_on:
       - resource-mongo
+    networks:
+      - resource-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    develop:
+      watch:
+        - action: sync
+          path: ./app
+          target: /app
+          ignore:
+            - __pycache__/
+        - action: rebuild
+          path: requirements.txt
 
   resource-mongo:
     image: mongo:latest
@@ -21,7 +39,12 @@ services:
       timeout: 5s
       retries: 5
       start_period: 6s
+    networks:
+      - resource-network
 
 volumes:
   resource_db:
 
+networks:
+  resource-network:
+    name: resource-network

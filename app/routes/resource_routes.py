@@ -7,14 +7,14 @@ from services.resource_service import (
     get_resource_by_id,
     create_resource,
     update_resource,
-    delete_resource
+    delete_resource,
 )
 from schemas.resource import (
     Resource,
     ResourceCreate,
     ResourceUpdate,
     ResourcePatch,
-    ResourceDelete
+    ResourceDelete,
 )
 
 router = APIRouter()
@@ -24,7 +24,9 @@ INVALID_RESOURCE_ID = "Invalid resource ID"
 
 
 @router.get("/", response_model=List[Resource])
-async def get_resources(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=50)):
+async def get_resources(
+    skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=50)
+):
     return await get_all_resources(skip=skip, limit=limit)
 
 
@@ -44,8 +46,7 @@ async def get_resource(resource_id: str):
 async def create_resource_route(resource: ResourceCreate):
     created_resource = await create_resource(resource)
     if not created_resource:
-        raise HTTPException(
-            status_code=400, detail="Failed to create resource")
+        raise HTTPException(status_code=400, detail="Failed to create resource")
     return created_resource
 
 
@@ -55,7 +56,7 @@ async def update_resource_route(resource_id: str, resource: ResourceUpdate):
         PyObjectId(resource_id)
     except (InvalidId, ValueError):
         raise HTTPException(status_code=400, detail=INVALID_RESOURCE_ID)
-    updated_resource = await update_resource(resource_id, resource.dict())
+    updated_resource = await update_resource(resource_id, resource)
     if not updated_resource:
         raise HTTPException(status_code=404, detail=RESOURCE_NOT_FOUND)
     return updated_resource
@@ -67,7 +68,9 @@ async def patch_resource_route(resource_id: str, resource: ResourcePatch):
         PyObjectId(resource_id)
     except (InvalidId, ValueError):
         raise HTTPException(status_code=400, detail=INVALID_RESOURCE_ID)
-    updated_resource = await update_resource(resource_id, resource.dict(exclude_unset=True))
+    updated_resource = await update_resource(
+        resource_id, resource.dict(exclude_unset=True)
+    )
     if not updated_resource:
         raise HTTPException(status_code=404, detail=RESOURCE_NOT_FOUND)
     return updated_resource

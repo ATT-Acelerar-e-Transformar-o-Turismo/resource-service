@@ -1,13 +1,44 @@
 from fastapi import FastAPI
-from routes.resource_routes import router as resource_router
-from routes.health import router as health_router
+from fastapi.middleware.cors import CORSMiddleware
+from routes import router as api_router
+from dependencies.rabbitmq import rabbitmq_client
+import logging
+from contextlib import asynccontextmanager
+from config import settings
+from services import data_collector  # noqa
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-app.include_router(resource_router, prefix="/resources", tags=["Resources"])
-app.include_router(health_router, tags=["Health"])
+# CORS Configuration
+origins = settings.ORIGINS.split(",")
+logger.info(f"Origins: {origins}")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(api_router)
 
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from questions service!"}
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await rabbitmq_client.connect()
+    logger.info("Connected to RabbitMQ")
+
+    await rabbitmq_client.start_consumers()
+    logger.info("Started RabbitMQ consumers")
+
+    try:
+        yield
+    finally:
+        if rabbitmq_client:
+            await rabbitmq_client.close()
+            logger.info("Closed RabbitMQ connection")
+
+
+app.router.lifespan_context = lifespan
