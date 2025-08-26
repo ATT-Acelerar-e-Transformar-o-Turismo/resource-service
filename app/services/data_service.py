@@ -1,28 +1,26 @@
 from typing import List, Optional, Dict, Any, AsyncGenerator
 from bson.objectid import ObjectId
 from dependencies.database import db
-from utils.mongo_utils import serialize, deserialize
-from schemas.data_segment import TimePoint
+from schemas.data_segment import TimePoint, DataSegment
 from datetime import datetime, UTC
-from config import settings
 
 
 async def create_data_segment(
     resource_id: ObjectId, points: List[TimePoint]
-) -> None:
+) -> Optional[DataSegment]:
     resource = await db.resources.find_one({"_id": resource_id})
 
     if not resource:
         return
 
-    # Store raw data segment
-    await db.data_segments.insert_one(
-        {
-            "resource_id": resource_id,
-            "points": [p.model_dump() for p in points],
-            "created_at": datetime.now(UTC), # It's here where the priority during merge is determined.
-        }
+    new_datasegment = DataSegment(
+        resource_id=resource_id,
+        points=points,
+        created_at=datetime.now(UTC), # It's here where the priority during merge is determined.
     )
+
+    # Store raw data segment (convert to json)
+    await db.data_segments.insert_one(new_datasegment.model_dump())
 
     # Merge logic with created_at-based override
     all_points_cursor = db.data_segments.find(
@@ -71,6 +69,8 @@ async def create_data_segment(
         update["endPeriod"] = max_x
     if update:
         await db.resources.update_one({"_id": resource_id}, {"$set": update})
+
+    return new_datasegment
 
 
 async def get_data_by_resource_id(
