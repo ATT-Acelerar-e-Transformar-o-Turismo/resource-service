@@ -37,7 +37,3 @@ class ResourceDelete(BaseModel):
     id: str
     deleted: bool
 
-
-class ResourceData(BaseModel):
-    resource_id: PyObjectId
-    data: List[DataPoint]

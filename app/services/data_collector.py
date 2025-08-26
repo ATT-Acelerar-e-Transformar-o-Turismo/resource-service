@@ -27,13 +27,13 @@ async def process_collected_data(message: aio_pika.abc.AbstractIncomingMessage):
 
             # Find resource by wrapper_id
             resource = await db.resources.find_one(
-                {"wrapper_id": wrapper_id, "deleted": False}
-            )
+                    {"wrapper_id": wrapper_id, "deleted": False}
+                    )
 
             if not resource:
                 raise ResourceNotFoundException(
-                    f"Resource with wrapper_id {wrapper_id} not found"
-                )
+                        f"Resource with wrapper_id {wrapper_id} not found"
+                        )
 
             points = [TimePoint(**p) for p in points_data]
 
@@ -41,34 +41,18 @@ async def process_collected_data(message: aio_pika.abc.AbstractIncomingMessage):
                 logger.warning("Empty data in message, discarding.")
                 return
 
-            await create_data_segment(resource["_id"], points)
+            data_segment = await create_data_segment(resource["_id"], points)
+            if not data_segment:
+                logger.warning(f"Data segment creation failed, discarding message: {data}")
+                return
+            logger.debug(f"Data segment created successfully: {data_segment}")
 
-            min_time = min(p.x for p in points)
-            max_time = max(p.x for p in points)
-
-            # Get the data in chunks and publish
-            async for chunk in get_data_by_resource_id(
-                resource["_id"],
-                min_time=min_time,
-                max_time=max_time,
-                chunk_size=settings.CHUNK_SIZE_THRESHOLD,
-                sorted=True
-            ):
-                data = chunk.get("data", [])
-                if not data:
-                    continue
-
-                chunk_interval = {"start": data[0]["x"], "end": data[-1]["x"]}
-
-                message_to_publish = {
-                    "resource_id": str(resource["_id"]),
-                    "data": data,
-                    "chunk_interval": chunk_interval,
-                }
-
-                await rabbitmq_client.publish(
-                    settings.RESOURCE_DATA_QUEUE, json.dumps(message_to_publish, default=str)
-                )
+            await rabbitmq_client.publish(
+                    settings.RESOURCE_DATA_QUEUE, json.dumps({
+                        "resource_id": str(resource["_id"]),
+                        "data": points_data
+                        })
+                    )
 
         except json.JSONDecodeError:
             logger.error("Invalid JSON format, discarding message.")
