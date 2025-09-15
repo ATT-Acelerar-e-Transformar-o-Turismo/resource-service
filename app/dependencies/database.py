@@ -1,4 +1,5 @@
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 import logging
 import time
 from config import settings
@@ -17,7 +18,7 @@ if CONNECTION_STRING:
             db = client.get_default_database()
             logger.info("Successfully connected to MongoDB")
             break
-        except Exception as e:
+        except (ConnectionFailure, ServerSelectionTimeoutError) as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
             logger.info("Retrying in 5 seconds...")
             time.sleep(5)

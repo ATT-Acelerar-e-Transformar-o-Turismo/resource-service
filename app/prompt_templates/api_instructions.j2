@@ -1,0 +1,55 @@
+API IMPLEMENTATION:
+- Use requests.get() with auth_config headers/params
+- Parse JSON response and extract relevant fields
+- Runs continuously with {{ periodicity }} periodicity
+- Handle rate limiting and pagination
+
+*** CRITICAL: DO NOT MODIFY fetch_historical_data() method ***
+This method is already complete and handles batch fetching logic.
+
+REQUIRED METHODS TO CUSTOMIZE:
+1. fetch_date_range(start_date, end_date): Fetch specific date ranges
+   - Make API calls with date parameters
+   - Handle response parsing and data extraction
+   - Use RateLimitHandler: await self.rate_limiter.handle_rate_limit(response)
+
+2. get_interval_seconds(): Convert periodicity to seconds
+   - Return appropriate interval based on {{ periodicity }} periodicity
+   - Example: 3600 for hourly, 86400 for daily
+
+3. fetch_external_data(): Fetch current/latest data (NO MOCK DATA!)
+   - For APIs: Use same logic as fetch_date_range() but for current data
+   - Make real API calls, do NOT use random.uniform() or mock data
+   - Return actual data from the API, not placeholder values
+
+*** INDICATOR NAME HANDLING ***:
+- Analyze DATA SAMPLE for indicator name variations
+- Use flexible matching for indicators with suffixes like "(Projection)", "(Estimate)", etc.
+- Example: if base_indicator in item.get('indicator', '') or item.get('indicator', '').startswith(base_indicator)
+- This ensures all related data points are captured regardless of suffix variations
+
+ERROR HANDLING - CRITICAL:
+- 429 (Rate Limit): CONTINUE execution, do NOT raise exception
+- 400 (Bad Request): CONTINUE execution, do NOT raise exception  
+- Use RateLimitHandler to handle 429 automatically: await self.rate_limiter.handle_rate_limit(response)
+
+JSON RESPONSE HANDLING (analyze DATA SAMPLE structure):
+- Direct list: measurements = json_data (if response is [...])
+- Nested data: measurements = json_data.get('data', []) or json_data.get('results', [])
+- Handle both formats: if isinstance(json_data, list): measurements = json_data
+- Common data keys: 'timestamp'/'time'/'date' for datetime, 'value'/'measurement' for numeric
+
+DATE PARAMETERS (analyze DATA SAMPLE):
+- Common formats: startdate/enddate, from/to, date_from/date_to
+- Unless otherwise specified, use all these parameters to guarantee that the data is fetched correctly
+- Example: ?startdate=2025-01-01&enddate=2025-01-31&from=2025-01-01&to=2025-01-31&date_from=2025-01-01&date_to=2025-01-31
+
+*** DATE FILTERING - CRITICAL ***:
+- When needed, use INCLUSIVE date filtering: start_date <= data_datetime <= end_date
+- NEVER use exclusive end_date filtering that might exclude boundary data points
+- Is acceptable to have data points fetched more than once, but missing some data points is not acceptable
+- For year-only data: ensure start_date includes the full target year (e.g., 2020-01-01 for year 2020)
+- Example: if start_date <= datetime(year, 1, 1) <= end_date (INCLUSIVE both ends)
+
+CRITICAL: Implement fetch_date_range(), get_interval_seconds(), and fetch_external_data() methods.
+NO MOCK DATA in fetch_external_data() - use real API calls!

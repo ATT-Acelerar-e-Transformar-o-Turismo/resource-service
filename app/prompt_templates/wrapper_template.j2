@@ -1,0 +1,130 @@
+import asyncio
+import requests
+import os
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+import random
+import time
+from utils import RateLimitHandler, mask_credentials, HistoricalDataFetcher, MessageQueueSender, get_interval_from_periodicity, ContinuousExecutor
+{{ additional_imports }}
+
+class ATTWrapper:
+    def __init__(self, wrapper_id: int, rabbitmq_url: str = None):
+        self.wrapper_id = wrapper_id
+        self.rabbitmq_url = rabbitmq_url or os.getenv('AMQP_URL', 'amqp://guest:guest@localhost/')
+        self.source_type = "{{ source_type }}"
+        self.periodicity = "{{ periodicity }}"
+        self.rate_limiter = RateLimitHandler()
+        self.historical_data_fetched = False
+        
+        # Wrapper metadata
+        self.metadata = {
+            "source_type": self.source_type,
+            "periodicity": self.periodicity,
+            "wrapper_version": "1.0"
+        }
+        
+        # Initialize utilities
+        self.message_sender = MessageQueueSender(self.wrapper_id, self.rabbitmq_url, self.metadata)
+        self.historical_fetcher = HistoricalDataFetcher(self.wrapper_id, self.get_interval_seconds)
+        self.continuous_executor = ContinuousExecutor(self.wrapper_id, self.get_interval_seconds())
+        
+    def get_interval_seconds(self) -> int:
+        """Convert periodicity to seconds for API sources"""
+        return get_interval_from_periodicity(self.periodicity)
+    
+    async def fetch_historical_data(self) -> List[Dict[str, Any]]:
+        """
+        Fetch historical data from API with date range parameters
+        
+        *** DO NOT MODIFY THIS METHOD ***
+        This method uses the HistoricalDataFetcher utility for optimal batch processing.
+        Only customize fetch_date_range() and fetch_external_data() methods.
+        """
+        total_points_sent = await self.historical_fetcher.fetch_all_historical_data(
+            fetch_date_range_func=self.fetch_date_range,
+            send_to_queue_func=self.send_to_queue
+        )
+        return []  # Return empty list since data was already sent to queue
+    
+    async def fetch_date_range(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
+        """Fetch data for a specific date range"""
+        # PLACEHOLDER: Implement date range fetching
+        # if not specified, use all these parameters to guarantee that the data is fetched correctly
+        # ?from=2025-01-01&to=2025-01-31&start=2025-01-01&end=2025-01-31&startdate=2025-01-01&enddate=2025-01-31
+        
+        print(f"Wrapper {self.wrapper_id}: Fetching historical data from {start_date} to {end_date}...")
+        
+        # Example of using the rate limit handler with Response object:
+        # response = requests.get(url, headers=headers, params=params)
+        # 
+        # # Handle rate limiting with complete response object
+        # await self.rate_limiter.handle_rate_limit(response)
+        
+        ...
+        return []
+
+    async def fetch_external_data(self) -> List[Dict[str, Any]]:
+        """
+        Fetch data from external source and convert to timeseries format
+        [{'x': 'YYYY-MM-DD HH:MM:SS', 'y': VALUE}, ...]
+        """
+        # PLACEHOLDER: Replace this with actual data fetching logic
+        
+        try:
+            # PLACEHOLDER FOR SOURCE-SPECIFIC IMPLEMENTATION
+            ...
+            
+            # Mock data for demonstration - replace with actual logic
+            base_time = datetime.now()
+            data_points = []
+            
+            for i in range(10):
+                point_time = base_time + timedelta(minutes=i * 5)
+                data_points.append({
+                    "x": point_time.isoformat(),
+                    "y": random.uniform(0, 100)
+                })
+                
+            return data_points
+            
+        except Exception as e:
+            print(f"Error fetching external data: {str(e)}")
+            raise
+    
+    async def send_to_queue(self, data_points: List[Dict[str, Any]]):
+        """Send formatted data to RabbitMQ queue"""
+        await self.message_sender.send_to_queue(data_points)
+    
+    async def run_once(self):
+        """Execute one cycle of data fetching and sending"""
+        print(f"Wrapper {self.wrapper_id}: Starting data fetch for {self.source_type} source.")
+        data_points = await self.fetch_external_data()
+        if data_points:
+            await self.send_to_queue(data_points)
+        else:
+            print(f"Wrapper {self.wrapper_id}: No data to send")
+            raise Exception("No data points were fetched from the source")
+    
+    async def run_continuous(self):
+        """Run the wrapper continuously with intervals based on periodicity"""
+        await self.continuous_executor.run_continuous(
+            run_once_func=self.run_once,
+            fetch_historical_func=self.fetch_historical_data if not self.historical_data_fetched else None,
+            source_type=self.source_type
+        )
+    
+# Entry point for generated wrapper
+if __name__ == "__main__":
+    import sys
+    
+    wrapper_id = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+    wrapper = ATTWrapper(wrapper_id)
+    
+    # Determine execution mode based on source type
+    if wrapper.source_type in ["CSV", "XLSX"]:
+        print(f"File source ({wrapper.source_type}) detected - running once")
+        asyncio.run(wrapper.run_once())
+    else:
+        print(f"API source detected - running continuously with {wrapper.periodicity} periodicity")
+        asyncio.run(wrapper.run_continuous())

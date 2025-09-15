@@ -1,0 +1,12 @@
+CSV IMPLEMENTATION:
+- Use pd.read_csv() with encoding/separator handling
+- Extract timestamp and value columns from DATA SAMPLE
+- Handle decimal separators: decimal=',' if needed
+- File runs once, periodicity ({{ periodicity }}) is reference only
+
+DATETIME PATTERNS:
+- Years (2004, 2005): format='%Y' → '%Y-01-01T00:00:00'
+- Dates (2004-01-01): format='%Y-%m-%d' → '%Y-%m-%dT00:00:00'  
+- Timestamps: format='%Y-%m-%d %H:%M:%S' → '%Y-%m-%dT%H:%M:%S'
+
+CRITICAL: Always use format parameter in pd.to_datetime() for numeric years.
