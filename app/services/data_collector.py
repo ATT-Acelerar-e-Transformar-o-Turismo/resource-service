@@ -58,7 +58,9 @@ async def process_collected_data(message: aio_pika.abc.AbstractIncomingMessage):
             logger.error("Invalid JSON format, discarding message.")
         except ResourceNotFoundException as e:
             logger.warning(e)
+        except (ValueError, TypeError) as e:
+            logger.error(f"Data validation error: {e}")
+            await message.nack(requeue=False)
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
-            # Requeue the message for another attempt
+            logger.error(f"Unexpected error processing message: {e}")
             await message.nack(requeue=True)

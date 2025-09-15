@@ -13,6 +13,13 @@ class Settings(BaseSettings):
         default="collected_data", env="COLLECTED_DATA_QUEUE"
     )
     CHUNK_SIZE_THRESHOLD: int = Field(default=1000, env="CHUNK_SIZE_THRESHOLD")
+    
+    # Wrapper Generation
+    GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
+    DATA_RABBITMQ_URL: str = Field(
+        default="amqp://user:password@data-mq:5672/", env="DATA_RABBITMQ_URL"
+    )
+    DATA_QUEUE_NAME: str = Field(default="data_queue", env="DATA_QUEUE_NAME")
 
     class Config:
         env_file = ".env"

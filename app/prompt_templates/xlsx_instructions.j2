@@ -1,0 +1,21 @@
+XLSX IMPLEMENTATION:
+- Use pd.read_excel() with sheet handling
+- Extract timestamp and value columns from DATA SAMPLE
+- Handle multiple sheets (usually first sheet)
+- File runs once, periodicity ({{ periodicity }}) is reference only
+
+DATETIME PATTERNS:
+- Years (2004, 2005): format='%Y' → '%Y-01-01T00:00:00'
+- Dates (2004-01-01): format='%Y-%m-%d' → '%Y-%m-%dT00:00:00'
+- Timestamps: format='%Y-%m-%d %H:%M:%S' → '%Y-%m-%dT%H:%M:%S'
+
+EXAMPLE FOR YEAR-ONLY DATA:
+```python
+df = pd.read_excel(file_path, sheet_name='Dados')
+df_cleaned = df[['Anos', 'Algarve']].dropna()
+df_cleaned['x'] = pd.to_datetime(df_cleaned['Anos'], format='%Y').dt.strftime('%Y-01-01T00:00:00')
+df_cleaned['y'] = pd.to_numeric(df_cleaned['Algarve'], errors='coerce')
+return df_cleaned[['x', 'y']].to_dict(orient='records')
+```
+
+CRITICAL: Always use format parameter in pd.to_datetime() for numeric years.
