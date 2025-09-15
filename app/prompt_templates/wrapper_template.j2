@@ -17,8 +17,15 @@ class ATTWrapper:
         self.rate_limiter = RateLimitHandler()
         self.historical_data_fetched = False
         
+        # Wrapper metadata
+        self.metadata = {
+            "source_type": self.source_type,
+            "periodicity": self.periodicity,
+            "wrapper_version": "1.0"
+        }
+        
         # Initialize utilities
-        self.message_sender = MessageQueueSender(self.wrapper_id, self.rabbitmq_url)
+        self.message_sender = MessageQueueSender(self.wrapper_id, self.rabbitmq_url, self.metadata)
         self.historical_fetcher = HistoricalDataFetcher(self.wrapper_id, self.get_interval_seconds)
         self.continuous_executor = ContinuousExecutor(self.wrapper_id, self.get_interval_seconds())
         

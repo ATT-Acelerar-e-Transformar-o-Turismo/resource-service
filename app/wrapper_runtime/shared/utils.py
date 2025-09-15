@@ -306,9 +306,10 @@ class MessageQueueSender:
     """
     MAX_POINTS_PER_MESSAGE = settings.MAX_POINTS_PER_MESSAGE
     
-    def __init__(self, wrapper_id: int, rabbitmq_url: str):
+    def __init__(self, wrapper_id: int, rabbitmq_url: str, metadata: dict = None):
         self.wrapper_id = wrapper_id
         self.rabbitmq_url = rabbitmq_url
+        self.metadata = metadata or {}
     
     async def send_to_queue(self, data_points: List[Dict[str, Any]]):
         """Send formatted data to RabbitMQ queue with automatic chunking"""
@@ -329,7 +330,8 @@ class MessageQueueSender:
                 if total_points <= self.MAX_POINTS_PER_MESSAGE:
                     message_data = {
                         "wrapper_id": self.wrapper_id,
-                        "data_segment": data_points,
+                        "data": data_points,
+                        "metadata": self.metadata,
                         "total_segments": 1,
                         "segment_number": 1
                     }
@@ -352,7 +354,8 @@ class MessageQueueSender:
                         
                         message_data = {
                             "wrapper_id": self.wrapper_id,
-                            "data_segment": chunk,
+                            "data": chunk,
+                            "metadata": self.metadata,
                             "total_segments": total_segments,
                             "segment_number": segment_num + 1
                         }
