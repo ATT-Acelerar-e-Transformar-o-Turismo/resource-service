@@ -256,7 +256,25 @@ class WrapperGenerator:
         elif source_config.source_type == "XLSX":
             data_sample = self.get_xlsx_sample(source_config.location)
         elif source_config.source_type == "API":
-            data_sample = self.get_api_sample(source_config.location, source_config.auth_config)
+            # Convert new API config format to legacy auth_config for compatibility
+            auth_config = {}
+            if source_config.auth_type == "api_key" and source_config.api_key:
+                auth_config['api_key'] = source_config.api_key
+                auth_config['header_name'] = source_config.api_key_header or "X-API-Key"
+            elif source_config.auth_type == "bearer" and source_config.bearer_token:
+                auth_config['headers'] = {"Authorization": f"Bearer {source_config.bearer_token}"}
+            elif source_config.auth_type == "basic" and source_config.username and source_config.password:
+                import base64
+                credentials = base64.b64encode(f"{source_config.username}:{source_config.password}".encode()).decode()
+                auth_config['headers'] = {"Authorization": f"Basic {credentials}"}
+            
+            # Add custom headers and query params
+            if source_config.custom_headers:
+                auth_config.setdefault('headers', {}).update(source_config.custom_headers)
+            if source_config.query_params:
+                auth_config['params'] = source_config.query_params
+                
+            data_sample = self.get_api_sample(source_config.location, auth_config)
         else:
             data_sample = "Unknown source type"
         
