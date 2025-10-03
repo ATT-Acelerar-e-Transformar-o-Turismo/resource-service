@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from config import settings
 from services import data_collector  # noqa
+from services import wrapper_service  # noqa
 
 logger = logging.getLogger(__name__)
 

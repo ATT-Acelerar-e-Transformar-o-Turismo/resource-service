@@ -3,7 +3,7 @@ from services.wrapper_service import WrapperService
 from schemas.wrapper import (
     WrapperGenerationRequest, GeneratedWrapper, WrapperExecutionResult
 )
-from typing import List
+from typing import List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -46,3 +46,4 @@ async def list_wrappers(skip: int = 0, limit: int = 10) -> List[GeneratedWrapper
     except Exception as e:
         logger.error(f"Failed to list wrappers: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve wrappers")
+

@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
+import uuid
 
 class SourceType(str, Enum):
     API = "API"
@@ -9,9 +10,11 @@ class SourceType(str, Enum):
     XLSX = "XLSX"
 
 class WrapperStatus(str, Enum):
-    CREATED = "created"
-    RUNNING = "running"
-    STOPPED = "stopped"
+    PENDING = "pending"
+    GENERATING = "generating" 
+    CREATING_RESOURCE = "creating_resource"
+    EXECUTING = "executing"
+    COMPLETED = "completed"
     ERROR = "error"
 
 class IndicatorMetadata(BaseModel):
@@ -30,7 +33,23 @@ class DataSourceConfig(BaseModel):
     source_type: SourceType = Field(..., description="Type of data source")
     location: Optional[str] = Field(None, description="URL endpoint for API sources")
     file_id: Optional[str] = Field(None, description="File ID for uploaded CSV/XLSX files")
-    auth_config: Dict[str, Any] = Field(default_factory=dict, description="Authentication configuration")
+    
+    # API Authentication
+    auth_type: Optional[str] = Field(None, description="Authentication type: 'bearer', 'api_key', 'basic', 'none'")
+    api_key: Optional[str] = Field(None, description="API key for authentication")
+    api_key_header: Optional[str] = Field("X-API-Key", description="Header name for API key")
+    bearer_token: Optional[str] = Field(None, description="Bearer token for authentication")
+    username: Optional[str] = Field(None, description="Username for basic auth")
+    password: Optional[str] = Field(None, description="Password for basic auth")
+    
+    # API Configuration
+    rate_limit_per_minute: Optional[int] = Field(60, description="Maximum requests per minute")
+    timeout_seconds: Optional[int] = Field(30, description="Request timeout in seconds")
+    retry_attempts: Optional[int] = Field(3, description="Number of retry attempts on failure")
+    date_field: Optional[str] = Field(None, description="Field name for date/timestamp in API response")
+    value_field: Optional[str] = Field(None, description="Field name for the indicator value in API response")
+    custom_headers: Dict[str, str] = Field(default_factory=dict, description="Additional custom headers")
+    query_params: Dict[str, str] = Field(default_factory=dict, description="Default query parameters")
     
     def model_post_init(self, __context):
         """Validate that either location or file_id is provided based on source type"""
@@ -54,10 +73,14 @@ class GeneratedWrapper(BaseModel):
     resource_id: Optional[str] = None
     metadata: IndicatorMetadata
     source_config: DataSourceConfig
-    generated_code: str
+    generated_code: Optional[str] = None  # Can be None during generation
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    status: WrapperStatus = Field(default=WrapperStatus.CREATED)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: Optional[datetime] = None
+    status: WrapperStatus = Field(default=WrapperStatus.PENDING)
+    error_message: Optional[str] = None
     execution_log: list[str] = Field(default_factory=list)
+    execution_result: Optional["WrapperExecutionResult"] = None
 
 class WrapperExecutionResult(BaseModel):
     wrapper_id: str
@@ -65,3 +88,13 @@ class WrapperExecutionResult(BaseModel):
     message: str
     data_points_sent: Optional[int] = None
     execution_time: datetime = Field(default_factory=datetime.utcnow)
+
+class AsyncWrapperCreationRequest(BaseModel):
+    metadata: IndicatorMetadata
+    source_config: DataSourceConfig
+    auto_create_resource: bool = Field(default=True, description="Automatically create resource")
+
+class AsyncWrapperCreationResponse(BaseModel):
+    wrapper_id: str
+    status: WrapperStatus
+    message: str
