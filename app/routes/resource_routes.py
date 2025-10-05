@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List
 from bson.errors import InvalidId
+import logging
 from schemas.common import PyObjectId
 from services.resource_service import (
     get_all_resources,
@@ -18,6 +19,7 @@ from schemas.resource import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 RESOURCE_NOT_FOUND = "Resource not found"
 INVALID_RESOURCE_ID = "Invalid resource ID"
@@ -78,11 +80,29 @@ async def patch_resource_route(resource_id: str, resource: ResourcePatch):
 
 @router.delete("/{resource_id}", response_model=ResourceDelete)
 async def delete_resource_route(resource_id: str):
+    # Check for common invalid values
+    if not resource_id or resource_id in ["undefined", "null", "None"]:
+        logger.error(f"Invalid or missing resource ID in delete request: '{resource_id}'")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid resource ID: '{resource_id}'. Please provide a valid resource ID."
+        )
+    
     try:
         PyObjectId(resource_id)
-    except (InvalidId, ValueError):
-        raise HTTPException(status_code=400, detail=INVALID_RESOURCE_ID)
-    deleted_resource = await delete_resource(resource_id)
-    if not deleted_resource:
-        raise HTTPException(status_code=404, detail=RESOURCE_NOT_FOUND)
-    return deleted_resource
+    except (InvalidId, ValueError) as e:
+        logger.error(f"Invalid resource ID format in delete request: {resource_id}, error: {e}")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid resource ID format: '{resource_id}'. Expected a valid MongoDB ObjectId (24 character hex string)."
+        )
+    
+    try:
+        deleted_resource = await delete_resource(resource_id)
+        if not deleted_resource:
+            raise HTTPException(status_code=404, detail=RESOURCE_NOT_FOUND)
+        return deleted_resource
+    except ValueError as e:
+        # This handles the InvalidId error from the service layer
+        logger.error(f"Service layer validation failed for resource ID: {resource_id}")
+        raise HTTPException(status_code=400, detail=str(e))
