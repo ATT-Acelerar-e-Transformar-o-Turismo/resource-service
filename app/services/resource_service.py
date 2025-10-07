@@ -3,11 +3,12 @@ from bson.objectid import ObjectId
 from bson.errors import InvalidId
 from pymongo.errors import DuplicateKeyError, OperationFailure
 from dependencies.database import db
+from dependencies.rabbitmq import rabbitmq_client
 from utils.mongo_utils import serialize, deserialize
 from schemas.resource import ResourceCreate, ResourceDelete, ResourceUpdate
-from schemas.data_segment import TimePoint
-from services.data_service import create_data_segment
 from datetime import datetime
+from config import settings
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ async def create_resource(resource_data: ResourceCreate) -> Optional[dict]:
         # Extract uploaded data before removing it from resource
         uploaded_data = resource_dict.get("data", [])
         uploaded_headers = resource_dict.get("headers", [])
+        wrapper_id = resource_dict.get("wrapper_id")
         
         # Convert frontend string dates to database datetime fields
         if "start_period" in resource_dict and resource_dict["start_period"]:
@@ -68,67 +70,91 @@ async def create_resource(resource_data: ResourceCreate) -> Optional[dict]:
         resource_id = result.inserted_id
         
         if resource_id:
-            # Process uploaded data into time-series format if available
-            if uploaded_data and len(uploaded_data) > 0:
+            # Send uploaded data to message queue for processing (consistent with API wrappers)
+            # Process ALL data columns as separate series
+            if uploaded_data and len(uploaded_data) > 0 and wrapper_id:
                 try:
-                    logger.info(f"Processing {len(uploaded_data)} rows of uploaded data for resource {resource_id}")
+                    logger.info(f"Processing {len(uploaded_data)} rows with {len(uploaded_headers)} columns for resource {resource_id}")
                     
-                    # Convert rows to TimePoint format
-                    # Each row is [x_value, y_value, ...] where x is timestamp/year and y is the value
-                    time_points = []
-                    for row in uploaded_data:
-                        if len(row) >= 2:
-                            x_value = row[0]
-                            y_value = row[1]
-                            
-                            # Skip rows with missing data
-                            if x_value is None or y_value is None:
-                                continue
-                            
-                            # Convert x to datetime if it's not already
-                            if isinstance(x_value, (int, float)):
-                                # Assume it's a year (e.g., 2004)
-                                try:
-                                    x_datetime = datetime(int(x_value), 1, 1)
-                                except (ValueError, TypeError):
-                                    logger.warning(f"Skipping invalid x value: {x_value}")
+                    # Determine how many data columns we have (excluding the first x column)
+                    num_data_columns = len(uploaded_headers) - 1 if uploaded_headers else max(len(row) - 1 for row in uploaded_data if row)
+                    
+                    if num_data_columns == 0:
+                        logger.warning(f"No data columns found for resource {resource_id}")
+                        return await get_resource_by_id(str(resource_id))
+                    
+                    logger.info(f"File has {num_data_columns} data column(s), processing all columns")
+                    logger.info(f"Headers: {uploaded_headers}")
+                    
+                    # Process each data column (starting from column 1, column 0 is x-axis)
+                    for col_index in range(1, num_data_columns + 1):
+                        series_name = uploaded_headers[col_index] if uploaded_headers and len(uploaded_headers) > col_index else f"Column {col_index}"
+                        
+                        # Convert rows to message format for this column
+                        # Format: [{"x": "datetime_string", "y": float_value, "series": "column_name"}, ...]
+                        data_points = []
+                        for row in uploaded_data:
+                            if len(row) > col_index:
+                                x_value = row[0]
+                                y_value = row[col_index]
+                                
+                                # Skip rows with missing data
+                                if x_value is None or y_value is None:
                                     continue
-                            elif isinstance(x_value, str):
-                                # Try to parse as datetime
-                                try:
-                                    x_datetime = datetime.fromisoformat(x_value.replace('Z', '+00:00'))
-                                except ValueError:
-                                    # Try parsing as year
+                                
+                                # Convert x to ISO format string
+                                if isinstance(x_value, (int, float)):
                                     try:
                                         x_datetime = datetime(int(x_value), 1, 1)
+                                        x_str = x_datetime.isoformat()
                                     except (ValueError, TypeError):
                                         logger.warning(f"Skipping invalid x value: {x_value}")
                                         continue
-                            elif isinstance(x_value, datetime):
-                                x_datetime = x_value
-                            else:
-                                logger.warning(f"Skipping unsupported x type: {type(x_value)}")
-                                continue
-                            
-                            # Convert y to float
-                            try:
-                                y_float = float(y_value)
-                            except (ValueError, TypeError):
-                                logger.warning(f"Skipping invalid y value: {y_value}")
-                                continue
-                            
-                            time_points.append(TimePoint(x=x_datetime, y=y_float))
+                                elif isinstance(x_value, str):
+                                    try:
+                                        x_datetime = datetime.fromisoformat(x_value.replace('Z', '+00:00'))
+                                        x_str = x_datetime.isoformat()
+                                    except ValueError:
+                                        try:
+                                            x_datetime = datetime(int(x_value), 1, 1)
+                                            x_str = x_datetime.isoformat()
+                                        except (ValueError, TypeError):
+                                            logger.warning(f"Skipping invalid x value: {x_value}")
+                                            continue
+                                elif isinstance(x_value, datetime):
+                                    x_str = x_value.isoformat()
+                                else:
+                                    logger.warning(f"Skipping unsupported x type: {type(x_value)}")
+                                    continue
+                                
+                                # Convert y to float
+                                try:
+                                    y_float = float(y_value)
+                                except (ValueError, TypeError):
+                                    logger.warning(f"Skipping invalid y value: {y_value}")
+                                    continue
+                                
+                                data_points.append({"x": x_str, "y": y_float, "series": series_name})
+                        
+                        # Publish to message queue if we have valid points for this series
+                        if data_points:
+                            message = {
+                                "wrapper_id": wrapper_id,
+                                "series_name": series_name,
+                                "data": data_points
+                            }
+                            await rabbitmq_client.publish(
+                                settings.COLLECTED_DATA_QUEUE,
+                                json.dumps(message)
+                            )
+                            logger.info(f"Successfully sent {len(data_points)} points for series '{series_name}' to queue")
+                        else:
+                            logger.warning(f"No valid data points extracted for series '{series_name}'")
                     
-                    # Create data segment if we have valid points
-                    if time_points:
-                        logger.info(f"Creating data segment with {len(time_points)} points for resource {resource_id}")
-                        await create_data_segment(resource_id, time_points)
-                        logger.info(f"Successfully created data segment for resource {resource_id}")
-                    else:
-                        logger.warning(f"No valid time points extracted from uploaded data for resource {resource_id}")
+                    logger.info(f"Completed processing {num_data_columns} series for resource {resource_id}")
                         
                 except Exception as e:
-                    logger.error(f"Failed to process uploaded data for resource {resource_id}: {e}")
+                    logger.error(f"Failed to send uploaded data to queue for resource {resource_id}: {e}")
                     # Don't fail the resource creation, just log the error
             
             return await get_resource_by_id(str(resource_id))
