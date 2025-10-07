@@ -28,18 +28,27 @@ class WrapperService:
     def __init__(self):
         # Type annotation for the runner using the Protocol
         self.runner: WrapperRunner
-        self.generator = WrapperGenerator(
-            gemini_api_key=settings.GEMINI_API_KEY,
-            rabbitmq_url=settings.DATA_RABBITMQ_URL,
-            debug_mode=False,
-            debug_dir="prompts"
-        )
+        # Only initialize generator if API key is provided
+        if settings.GEMINI_API_KEY:
+            self.generator = WrapperGenerator(
+                gemini_api_key=settings.GEMINI_API_KEY,
+                rabbitmq_url=settings.DATA_RABBITMQ_URL,
+                debug_mode=False,
+                debug_dir="prompts"
+            )
+        else:
+            self.generator = None
+            logger.warning("GEMINI_API_KEY not set - wrapper generation features will be disabled")
         self.runner = AsyncWrapperRunner()
         self.queue_name = "wrapper_creation_queue"
     
 
     async def generate_and_store_wrapper(self, request: WrapperGenerationRequest) -> GeneratedWrapper:
         """Queue wrapper creation asynchronously - all wrapper creation goes through queue"""
+        # Check if generator is available
+        if not self.generator:
+            raise Exception("Wrapper generation is disabled - GEMINI_API_KEY not configured")
+        
         try:
             # Generate unique wrapper ID
             wrapper_id = str(uuid.uuid4())
@@ -156,6 +165,10 @@ class WrapperService:
         
         try:
             logger.info(f"Processing wrapper creation {wrapper_id}")
+            
+            # Check if generator is available
+            if not self.generator:
+                raise Exception("Wrapper generation is disabled - GEMINI_API_KEY not configured")
             
             # Get the wrapper record
             wrapper_doc = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})

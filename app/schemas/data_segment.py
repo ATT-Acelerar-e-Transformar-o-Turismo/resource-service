@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 from datetime import datetime, UTC
 from schemas.common import PyObjectId
 
@@ -7,11 +7,13 @@ from schemas.common import PyObjectId
 class DataPoint(BaseModel):
     x: datetime | float
     y: float
+    series: Optional[str] = None  # Series name for multi-column resources
 
 
 class TimePoint(BaseModel):
     x: datetime
     y: float
+    series: Optional[str] = None  # Series name for multi-column resources
 
 
 class DataSegmentBase(BaseModel):

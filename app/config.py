@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     CHUNK_SIZE_THRESHOLD: int = Field(default=1000, env="CHUNK_SIZE_THRESHOLD")
     
     # Wrapper Generation
-    GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
+    GEMINI_API_KEY: str = Field(default="", env="GEMINI_API_KEY")
     DATA_RABBITMQ_URL: str = Field(
         default="amqp://user:password@data-mq:5672/", env="DATA_RABBITMQ_URL"
     )
