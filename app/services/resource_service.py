@@ -5,6 +5,9 @@ from pymongo.errors import DuplicateKeyError, OperationFailure
 from dependencies.database import db
 from utils.mongo_utils import serialize, deserialize
 from schemas.resource import ResourceCreate, ResourceDelete, ResourceUpdate
+from schemas.data_segment import TimePoint
+from services.data_service import create_data_segment
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,10 @@ async def create_resource(resource_data: ResourceCreate) -> Optional[dict]:
         resource_dict = deserialize(resource_data.dict())
         resource_dict["deleted"] = False
         
+        # Extract uploaded data before removing it from resource
+        uploaded_data = resource_dict.get("data", [])
+        uploaded_headers = resource_dict.get("headers", [])
+        
         # Convert frontend string dates to database datetime fields
         if "start_period" in resource_dict and resource_dict["start_period"]:
             # For now, keep as string since frontend sends strings like "2004"
@@ -58,8 +65,73 @@ async def create_resource(resource_data: ResourceCreate) -> Optional[dict]:
             resource_dict["file_metadata"] = deserialize(resource_dict["file_metadata"])
         
         result = await db.resources.insert_one(resource_dict)
-        if result.inserted_id:
-            return await get_resource_by_id(str(result.inserted_id))
+        resource_id = result.inserted_id
+        
+        if resource_id:
+            # Process uploaded data into time-series format if available
+            if uploaded_data and len(uploaded_data) > 0:
+                try:
+                    logger.info(f"Processing {len(uploaded_data)} rows of uploaded data for resource {resource_id}")
+                    
+                    # Convert rows to TimePoint format
+                    # Each row is [x_value, y_value, ...] where x is timestamp/year and y is the value
+                    time_points = []
+                    for row in uploaded_data:
+                        if len(row) >= 2:
+                            x_value = row[0]
+                            y_value = row[1]
+                            
+                            # Skip rows with missing data
+                            if x_value is None or y_value is None:
+                                continue
+                            
+                            # Convert x to datetime if it's not already
+                            if isinstance(x_value, (int, float)):
+                                # Assume it's a year (e.g., 2004)
+                                try:
+                                    x_datetime = datetime(int(x_value), 1, 1)
+                                except (ValueError, TypeError):
+                                    logger.warning(f"Skipping invalid x value: {x_value}")
+                                    continue
+                            elif isinstance(x_value, str):
+                                # Try to parse as datetime
+                                try:
+                                    x_datetime = datetime.fromisoformat(x_value.replace('Z', '+00:00'))
+                                except ValueError:
+                                    # Try parsing as year
+                                    try:
+                                        x_datetime = datetime(int(x_value), 1, 1)
+                                    except (ValueError, TypeError):
+                                        logger.warning(f"Skipping invalid x value: {x_value}")
+                                        continue
+                            elif isinstance(x_value, datetime):
+                                x_datetime = x_value
+                            else:
+                                logger.warning(f"Skipping unsupported x type: {type(x_value)}")
+                                continue
+                            
+                            # Convert y to float
+                            try:
+                                y_float = float(y_value)
+                            except (ValueError, TypeError):
+                                logger.warning(f"Skipping invalid y value: {y_value}")
+                                continue
+                            
+                            time_points.append(TimePoint(x=x_datetime, y=y_float))
+                    
+                    # Create data segment if we have valid points
+                    if time_points:
+                        logger.info(f"Creating data segment with {len(time_points)} points for resource {resource_id}")
+                        await create_data_segment(resource_id, time_points)
+                        logger.info(f"Successfully created data segment for resource {resource_id}")
+                    else:
+                        logger.warning(f"No valid time points extracted from uploaded data for resource {resource_id}")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to process uploaded data for resource {resource_id}: {e}")
+                    # Don't fail the resource creation, just log the error
+            
+            return await get_resource_by_id(str(resource_id))
         return None
     except DuplicateKeyError as e:
         logger.error(f"Resource creation failed - duplicate key: {e}")

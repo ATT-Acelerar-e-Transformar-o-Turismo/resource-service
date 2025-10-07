@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List
 from bson.errors import InvalidId
+from bson.objectid import ObjectId
+from datetime import datetime
 import logging
 from schemas.common import PyObjectId
 from services.resource_service import (
@@ -10,6 +12,7 @@ from services.resource_service import (
     update_resource,
     delete_resource,
 )
+from services.data_service import get_data_by_resource_id
 from schemas.resource import (
     Resource,
     ResourceCreate,
@@ -17,6 +20,7 @@ from schemas.resource import (
     ResourcePatch,
     ResourceDelete,
 )
+from schemas.data_segment import DataPoint
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -106,3 +110,42 @@ async def delete_resource_route(resource_id: str):
         # This handles the InvalidId error from the service layer
         logger.error(f"Service layer validation failed for resource ID: {resource_id}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{resource_id}/data", response_model=List[DataPoint])
+async def get_resource_data(
+    resource_id: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=10000),
+    sort: str = Query("asc", regex="^(asc|desc)$"),
+    start_date: datetime = Query(None, description="Start date for filtering"),
+    end_date: datetime = Query(None, description="End date for filtering"),
+):
+    """Get data points for a specific resource with optional filtering and pagination"""
+    try:
+        resource_obj_id = ObjectId(resource_id)
+    except (InvalidId, ValueError):
+        raise HTTPException(status_code=400, detail=INVALID_RESOURCE_ID)
+    
+    # Check if resource exists
+    resource = await get_resource_by_id(resource_id)
+    if not resource:
+        raise HTTPException(status_code=404, detail=RESOURCE_NOT_FOUND)
+    
+    # Get data from the data service
+    all_data = []
+    async for chunk in get_data_by_resource_id(
+        resource_obj_id,
+        min_time=start_date,
+        max_time=end_date,
+        sorted=True
+    ):
+        all_data.extend(chunk.get("data", []))
+    
+    # Apply pagination
+    if sort == "desc":
+        all_data.reverse()
+    
+    paginated_data = all_data[skip:skip + limit] if limit else all_data[skip:]
+    
+    return paginated_data
