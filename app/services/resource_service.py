@@ -62,7 +62,9 @@ async def update_resource(resource_id: str, resource_data: ResourceUpdate) -> Op
             {"_id": ObjectId(resource_id), "deleted": False},
             {"$set": deserialize(resource_data)}
         )
-        if result.modified_count > 0:
+        # Return resource even if not modified (idempotent operation)
+        # matched_count > 0 means the resource exists
+        if result.matched_count > 0:
             return await get_resource_by_id(resource_id)
         return None
     except InvalidId as e:
