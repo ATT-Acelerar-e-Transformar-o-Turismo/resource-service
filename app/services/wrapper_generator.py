@@ -241,20 +241,40 @@ class WrapperGenerator:
         except Exception as e:
             return f"Unexpected error: {str(e)}"
 
-    async def generate_wrapper(self, 
+    async def generate_wrapper(self,
                              indicator_metadata: IndicatorMetadata,
                              source_config: DataSourceConfig,
                              wrapper_id: str) -> str:
         """
         Use Gemini to generate a customized wrapper based on indicator metadata and source configuration
         """
-        
+
         # Get data sample based on source type
         print(f"Extracting sample from {source_config.source_type} source...")
         if source_config.source_type == "CSV":
-            data_sample = self.get_csv_sample(source_config.location)
+            # For uploaded files, use file_id to get the file path
+            if hasattr(source_config, 'file_id') and source_config.file_id:
+                from services.file_service import file_service
+                uploaded_file = await file_service.get_uploaded_file(source_config.file_id)
+                if uploaded_file:
+                    data_sample = self.get_csv_sample(uploaded_file.file_path)
+                    print(f"Loaded CSV from file_id: {source_config.file_id}")
+                else:
+                    data_sample = f"Error: Could not find uploaded file with id {source_config.file_id}"
+            else:
+                data_sample = self.get_csv_sample(source_config.location)
         elif source_config.source_type == "XLSX":
-            data_sample = self.get_xlsx_sample(source_config.location)
+            # For uploaded files, use file_id to get the file path
+            if hasattr(source_config, 'file_id') and source_config.file_id:
+                from services.file_service import file_service
+                uploaded_file = await file_service.get_uploaded_file(source_config.file_id)
+                if uploaded_file:
+                    data_sample = self.get_xlsx_sample(uploaded_file.file_path)
+                    print(f"Loaded XLSX from file_id: {source_config.file_id}")
+                else:
+                    data_sample = f"Error: Could not find uploaded file with id {source_config.file_id}"
+            else:
+                data_sample = self.get_xlsx_sample(source_config.location)
         elif source_config.source_type == "API":
             # Convert new API config format to legacy auth_config for compatibility
             auth_config = {}

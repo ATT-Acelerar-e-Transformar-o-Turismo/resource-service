@@ -15,13 +15,14 @@ from services.async_wrapper_runner import AsyncWrapperRunner
 from services.abc.wrapper_runner import WrapperRunner
 from services.wrapper_process_manager import wrapper_process_manager
 from schemas.wrapper import (
-    WrapperGenerationRequest, GeneratedWrapper, WrapperStatus, 
+    WrapperGenerationRequest, GeneratedWrapper, WrapperStatus,
     WrapperExecutionResult
 )
 from schemas.resource import ResourceCreate
 from config import settings
 import aio_pika
 import logging
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,8 @@ class WrapperService:
         self.generator = WrapperGenerator(
             gemini_api_key=settings.GEMINI_API_KEY,
             rabbitmq_url=settings.DATA_RABBITMQ_URL,
-            debug_mode=False,
-            debug_dir="prompts"
+            debug_mode=True,
+            debug_dir="/app/prompts"
         )
         self.runner = AsyncWrapperRunner()
         self.queue_name = "wrapper_creation_queue"
@@ -252,7 +253,7 @@ class WrapperService:
                 # For file sources (CSV/XLSX): execute once
                 execution_result = await self.runner.execute_wrapper(updated_wrapper)
                 logger.info(f"Executed file wrapper {wrapper_id}")
-                
+
                 # Mark as completed
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id},
@@ -265,14 +266,53 @@ class WrapperService:
                         }
                     }
                 )
-            
+
+            # DEMO: Call fake data insertion endpoints if resource exists
+            if resource_id:
+                await self._insert_fake_demo_data(resource_id, wrapper.source_config.source_type.value)
+
             logger.info(f"Completed wrapper creation {wrapper_id}")
             
         except Exception as e:
             logger.error(f"Failed to process wrapper creation {wrapper_id}: {e}")
             await self._update_wrapper_status(wrapper_id, WrapperStatus.ERROR, error_message=str(e))
             raise
-    
+
+    async def _insert_fake_demo_data(self, resource_id: str, source_type: str):
+        """Call fake data insertion endpoints for demo purposes"""
+        try:
+            # Get resource to find indicator_id
+            resource = await db.resources.find_one({"_id": ObjectId(resource_id)})
+            if not resource or "indicator_id" not in resource:
+                logger.warning(f"Resource {resource_id} has no indicator_id, skipping fake data insertion")
+                return
+
+            indicator_id = str(resource["indicator_id"])
+            indicator_service_url = "http://indicator-service:8080"
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                if source_type in ["CSV", "XLSX"]:
+                    # Insert CSV data (2011-2020)
+                    url = f"{indicator_service_url}/indicators/fake/insert-csv-data/{indicator_id}"
+                    response = await client.post(url)
+                    if response.status_code == 200:
+                        logger.info(f"DEMO: Inserted CSV fake data for indicator {indicator_id}")
+                    else:
+                        logger.warning(f"DEMO: Failed to insert CSV data: {response.status_code}")
+
+                elif source_type == "API":
+                    # Insert API data (2021-2025)
+                    url = f"{indicator_service_url}/indicators/fake/insert-api-data/{indicator_id}"
+                    response = await client.post(url)
+                    if response.status_code == 200:
+                        logger.info(f"DEMO: Inserted API fake data for indicator {indicator_id}")
+                    else:
+                        logger.warning(f"DEMO: Failed to insert API data: {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"DEMO: Failed to insert fake data for resource {resource_id}: {e}")
+            # Don't raise - this is just demo data, don't fail the whole process
+
     async def _update_wrapper_status(self, wrapper_id: str, status: WrapperStatus, error_message: Optional[str] = None):
         """Update wrapper status in database"""
         try:

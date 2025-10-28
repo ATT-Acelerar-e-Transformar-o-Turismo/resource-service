@@ -32,18 +32,31 @@ TEMPLATE:
 {{ source_specific_instructions }}
 
 REQUIREMENTS:
-1. *** NEVER modify fetch_historical_data() - it uses HistoricalDataFetcher class ***
-2. ONLY customize these methods based on source type:
+1. *** CRITICAL: USE EXISTING IMPORTS - DO NOT CREATE DUMMY CLASSES ***
+   The template already imports: RateLimitHandler, HistoricalDataFetcher, MessageQueueSender, etc.
+   NEVER recreate these classes - they are provided by utils.py
+   DO NOT add comments like "# Assuming utils.py contains..." or create placeholder implementations
+
+2. *** NEVER modify fetch_historical_data() - it uses HistoricalDataFetcher class ***
+
+3. ONLY customize these methods based on source type:
    - CSV/XLSX: fetch_external_data() only
    - API: fetch_date_range(), get_interval_seconds(), and fetch_external_data() only
-3. Replace ALL PLACEHOLDER/... with working code in the methods above
-4. Use DATA SAMPLE to understand JSON/CSV/XLSX structure
-5. Ensure "x" values are ISO 8601 format
-6. Keep existing template structure unchanged
-7. Add necessary imports/error handling
+
+4. Replace ALL PLACEHOLDER/... with working code in the methods above
+
+5. Use DATA SAMPLE to understand JSON/CSV/XLSX structure - DO NOT rely on any field names passed separately
+
+6. Ensure "x" values are ISO 8601 format
+
+7. Keep existing template structure unchanged - especially keep the imports from utils
+
 8. *** FOR APIs: NEVER raise exceptions for HTTP errors (429, 400, 500+) - return empty list instead ***
+
 9. *** FOR APIs: NO MOCK DATA in fetch_external_data() - use real API calls with actual data ***
+
 10. *** HANDLE INDICATOR NAME VARIATIONS: Use flexible matching for indicators with suffixes (Projection, Estimate, etc.) ***
+
 11. *** USE INCLUSIVE DATE FILTERING: start_date <= data_datetime <= end_date (never exclude boundary points) ***
 
 Return ONLY complete Python code, no explanations.
