@@ -28,15 +28,23 @@ app.include_router(api_router)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from services.wrapper_process_manager import wrapper_process_manager
+
     await rabbitmq_client.connect()
     logger.info("Connected to RabbitMQ")
 
     await rabbitmq_client.start_consumers()
     logger.info("Started RabbitMQ consumers")
 
+    await wrapper_process_manager.start_monitoring()
+    logger.info("Started wrapper process monitoring")
+
     try:
         yield
     finally:
+        await wrapper_process_manager.stop_monitoring()
+        logger.info("Stopped wrapper process monitoring")
+
         if rabbitmq_client:
             await rabbitmq_client.close()
             logger.info("Closed RabbitMQ connection")

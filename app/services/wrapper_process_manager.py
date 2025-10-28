@@ -114,12 +114,19 @@ class WrapperProcessManager:
             env = os.environ.copy()
             env['DATA_RABBITMQ_URL'] = settings.DATA_RABBITMQ_URL
             env['WRAPPER_ID'] = wrapper_id
+            env['PYTHONPATH'] = '/app/wrapper_runtime/shared:' + env.get('PYTHONPATH', '')
             
+            # Create log files for wrapper output
+            log_dir = "/app/wrapper_logs"
+            os.makedirs(log_dir, exist_ok=True)
+            stdout_log = open(f"{log_dir}/{wrapper_id}_stdout.log", "w")
+            stderr_log = open(f"{log_dir}/{wrapper_id}_stderr.log", "w")
+
             process = subprocess.Popen(
                 ['python', temp_file_path],
                 env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=stdout_log,
+                stderr=stderr_log,
                 preexec_fn=os.setsid  # Create new process group
             )
             
@@ -131,7 +138,7 @@ class WrapperProcessManager:
             await db.generated_wrappers.update_one(
                 {"wrapper_id": wrapper_id},
                 {
-                    "$set": {"status": WrapperStatus.RUNNING.value},
+                    "$set": {"status": WrapperStatus.EXECUTING.value},
                     "$push": {"execution_log": f"Started process at {datetime.utcnow()}"}
                 }
             )

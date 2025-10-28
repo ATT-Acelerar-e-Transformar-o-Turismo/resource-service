@@ -179,7 +179,7 @@ class HistoricalDataFetcher:
     Handles the complex logic of fetching historical data in optimal batches
     """
     
-    def __init__(self, wrapper_id: int, get_interval_seconds_func: Callable[[], int]):
+    def __init__(self, wrapper_id: str, get_interval_seconds_func: Callable[[], int]):
         self.wrapper_id = wrapper_id
         self.get_interval_seconds = get_interval_seconds_func
         
@@ -306,7 +306,7 @@ class MessageQueueSender:
     """
     MAX_POINTS_PER_MESSAGE = settings.MAX_POINTS_PER_MESSAGE
     
-    def __init__(self, wrapper_id: int, rabbitmq_url: str, metadata: dict = None):
+    def __init__(self, wrapper_id: str, rabbitmq_url: str, metadata: dict = None):
         self.wrapper_id = wrapper_id
         self.rabbitmq_url = rabbitmq_url
         self.metadata = metadata or {}
@@ -416,7 +416,7 @@ class ContinuousExecutor:
     Handles continuous execution of wrappers with proper error handling and intervals
     """
     
-    def __init__(self, wrapper_id: int, interval_seconds: int):
+    def __init__(self, wrapper_id: str, interval_seconds: int):
         self.wrapper_id = wrapper_id
         self.interval_seconds = interval_seconds
         

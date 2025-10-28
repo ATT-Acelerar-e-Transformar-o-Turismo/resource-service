@@ -38,6 +38,18 @@ async def get_wrapper(wrapper_id: str) -> GeneratedWrapper:
         raise HTTPException(status_code=404, detail="Wrapper not found")
     return wrapper
 
+@router.get("/{wrapper_id}/code")
+async def get_wrapper_code(wrapper_id: str):
+    """Get the generated Python code for a wrapper"""
+    wrapper = await wrapper_service.get_wrapper(wrapper_id)
+    if not wrapper:
+        raise HTTPException(status_code=404, detail="Wrapper not found")
+    return {
+        "wrapper_id": wrapper_id,
+        "code": wrapper.generated_code,
+        "status": wrapper.status
+    }
+
 @router.get("/", response_model=List[GeneratedWrapper])
 async def list_wrappers(skip: int = 0, limit: int = 10) -> List[GeneratedWrapper]:
     """List all generated wrappers"""

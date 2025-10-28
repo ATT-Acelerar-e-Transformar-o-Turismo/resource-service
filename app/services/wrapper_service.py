@@ -13,6 +13,7 @@ from services.wrapper_generator import WrapperGenerator, IndicatorMetadata, Data
 from services.resource_service import create_resource
 from services.async_wrapper_runner import AsyncWrapperRunner
 from services.abc.wrapper_runner import WrapperRunner
+from services.wrapper_process_manager import wrapper_process_manager
 from schemas.wrapper import (
     WrapperGenerationRequest, GeneratedWrapper, WrapperStatus, 
     WrapperExecutionResult
@@ -224,24 +225,29 @@ class WrapperService:
             
             # Handle execution based on source type
             if wrapper.source_config.source_type.value == "API":
-                # For API sources: start continuous execution (don't wait for completion)
+                # For API sources: start continuous execution in separate process
                 logger.info(f"Starting continuous execution for API wrapper {wrapper_id}")
-                # Execute once to test, then let it run continuously in background
-                execution_result = await self.runner.execute_wrapper(updated_wrapper)
-                
-                # Mark as completed (continuously running)
-                await db.generated_wrappers.update_one(
-                    {"wrapper_id": wrapper_id},
-                    {
-                        "$set": {
-                            "status": WrapperStatus.COMPLETED.value,
-                            "execution_result": execution_result.model_dump(),
-                            "completed_at": datetime.utcnow(),
-                            "updated_at": datetime.utcnow()
+
+                # Start wrapper in background process for continuous execution
+                success = await wrapper_process_manager.start_wrapper_process(wrapper_id)
+
+                if success:
+                    logger.info(f"API wrapper {wrapper_id} started successfully and running continuously")
+                else:
+                    # If failed to start process, fall back to single execution
+                    logger.warning(f"Failed to start process for wrapper {wrapper_id}, falling back to single execution")
+                    execution_result = await self.runner.execute_wrapper(updated_wrapper)
+                    await db.generated_wrappers.update_one(
+                        {"wrapper_id": wrapper_id},
+                        {
+                            "$set": {
+                                "status": WrapperStatus.COMPLETED.value,
+                                "execution_result": execution_result.model_dump(),
+                                "completed_at": datetime.utcnow(),
+                                "updated_at": datetime.utcnow()
+                            }
                         }
-                    }
-                )
-                logger.info(f"API wrapper {wrapper_id} started successfully and running continuously")
+                    )
             else:
                 # For file sources (CSV/XLSX): execute once
                 execution_result = await self.runner.execute_wrapper(updated_wrapper)

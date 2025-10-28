@@ -17,7 +17,7 @@ from utils import RateLimitHandler, mask_credentials, HistoricalDataFetcher, Mes
 {additional_imports}
 
 class ATTWrapper:
-    def __init__(self, wrapper_id: int, rabbitmq_url: str = None):
+    def __init__(self, wrapper_id: str, rabbitmq_url: str = None):
         self.wrapper_id = wrapper_id
         self.rabbitmq_url = rabbitmq_url or os.getenv('AMQP_URL', 'amqp://guest:guest@localhost/')
         self.source_type = "{source_type}"
