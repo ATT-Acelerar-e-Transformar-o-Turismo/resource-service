@@ -18,6 +18,14 @@ CRITICAL DATETIME CONVERSION:
 - NEVER use pd.to_datetime() without format parameter for numeric years
 - Convert to ISO 8601: .dt.strftime('%Y-%m-%dT%H:%M:%S')
 
+*** HANDLING NON-ENGLISH DATE FORMATS (Portuguese, Spanish, French, etc.) ***:
+- When DATA SAMPLE contains month names in other languages (e.g., "Janeiro de 2011", "Agosto de 2012"), use locale or manual mapping
+- RECOMMENDED APPROACH: Create a month name mapping dictionary to convert to English or numeric values
+- Example for Portuguese: MONTH_MAP = {"Janeiro": "January", "Fevereiro": "February", "Março": "March", "Abril": "April", "Maio": "May", "Junho": "June", "Julho": "July", "Agosto": "August", "Setembro": "September", "Outubro": "October", "Novembro": "November", "Dezembro": "December"}
+- Parse pattern like "Mês de Ano" by extracting month and year, then converting: month_en = MONTH_MAP.get(month_pt); pd.to_datetime(f"{month_en} {year}", format='%B %Y')
+- For date keys in JSON objects (e.g., {"Janeiro de 2011": [...], "Fevereiro de 2011": [...]}), iterate through keys and parse each date
+- ALWAYS handle parsing errors gracefully - log the error and skip the data point rather than crashing
+
 TEMPLATE:
 {{ wrapper_template }}
 

@@ -38,6 +38,15 @@ JSON RESPONSE HANDLING (analyze DATA SAMPLE structure):
 - Nested data: measurements = json_data.get('data', []) or json_data.get('results', [])
 - Handle both formats: if isinstance(json_data, list): measurements = json_data
 - Common data keys: 'timestamp'/'time'/'date' for datetime, 'value'/'measurement' for numeric
+- Date-keyed objects: If DATA SAMPLE shows structure like {"Janeiro de 2011": [...], "Fevereiro de 2011": [...]}, iterate through .items() to get date keys and data arrays
+
+*** NON-ENGLISH DATE PARSING FOR APIs ***:
+- Carefully analyze DATA SAMPLE for date format (especially month names in Portuguese, Spanish, French, etc.)
+- If dates use non-English month names (e.g., "Janeiro de 2011", "Dezembro de 2025"), create a mapping dictionary
+- Portuguese months: {"Janeiro": 1, "Fevereiro": 2, "Março": 3, "Abril": 4, "Maio": 5, "Junho": 6, "Julho": 7, "Agosto": 8, "Setembro": 9, "Outubro": 10, "Novembro": 11, "Dezembro": 12}
+- Extract month and year from string, convert to datetime: pd.to_datetime(f"{year}-{month_num:02d}-01")
+- For APIs with date keys (not arrays), use: for date_key, data_array in json_data.get('Dados', {}).items()
+- Always wrap date parsing in try-except and log errors instead of crashing
 
 DATE PARAMETERS (analyze DATA SAMPLE):
 - Common formats: startdate/enddate, from/to, date_from/date_to

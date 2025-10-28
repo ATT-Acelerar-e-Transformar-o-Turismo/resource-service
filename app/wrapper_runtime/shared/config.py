@@ -6,7 +6,7 @@ class WrapperSettings(BaseSettings):
     """Configuration settings for wrapper runtime"""
     
     # Queue Configuration
-    DATA_QUEUE: str = Field(default="data", env="WRAPPER_DATA_QUEUE")
+    DATA_QUEUE: str = Field(default="resource_data", env="WRAPPER_DATA_QUEUE")
     
     # Message Configuration
     MAX_POINTS_PER_MESSAGE: int = Field(default=100000, env="WRAPPER_MAX_POINTS_PER_MESSAGE")
