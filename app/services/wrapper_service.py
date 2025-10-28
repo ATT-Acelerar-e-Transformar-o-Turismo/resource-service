@@ -238,20 +238,23 @@ class WrapperService:
                 )
             
             # Step 4: Execute wrapper
-            await self._update_wrapper_status(wrapper_id, WrapperStatus.EXECUTING)
+            # For file-based sources (CSV/XLSX), skip auto-execution to avoid race condition
+            # where data arrives before the resource is added to an indicator.
+            # User must manually execute after linking resource to indicator.
+            # For API sources, start continuous monitoring immediately.
             
-            # Create a GeneratedWrapper object for execution
-            updated_wrapper = GeneratedWrapper(
-                wrapper_id=wrapper_id,
-                resource_id=resource_id,
-                metadata=wrapper.metadata,
-                source_config=wrapper.source_config,
-                generated_code=generated_code,
-                status=WrapperStatus.EXECUTING
-            )
-            
-            # Handle execution based on source type
             if wrapper.source_config.source_type.value == "API":
+                await self._update_wrapper_status(wrapper_id, WrapperStatus.EXECUTING)
+                
+                # Create a GeneratedWrapper object for execution
+                updated_wrapper = GeneratedWrapper(
+                    wrapper_id=wrapper_id,
+                    resource_id=resource_id,
+                    metadata=wrapper.metadata,
+                    source_config=wrapper.source_config,
+                    generated_code=generated_code,
+                    status=WrapperStatus.EXECUTING
+                )
                 # For API sources: start continuous execution in separate process
                 logger.info(f"Starting continuous execution for API wrapper {wrapper_id}")
 
@@ -276,17 +279,14 @@ class WrapperService:
                         }
                     )
             else:
-                # For file sources (CSV/XLSX): execute once
-                execution_result = await self.runner.execute_wrapper(updated_wrapper)
-                logger.info(f"Executed file wrapper {wrapper_id}")
-                
-                # Mark as completed
+                # For file sources (CSV/XLSX): skip auto-execution
+                # Mark as ready and wait for manual execution after resource is linked to indicator
+                logger.info(f"File wrapper {wrapper_id} ready for manual execution")
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id},
                     {
                         "$set": {
                             "status": WrapperStatus.COMPLETED.value,
-                            "execution_result": execution_result.model_dump(),
                             "completed_at": datetime.utcnow(),
                             "updated_at": datetime.utcnow()
                         }

@@ -10,6 +10,7 @@ services:
       - resource-mongo
     networks:
       - resource-network
+      - default  # Add default bridge network for internet access
     dns:
       - 8.8.8.8
       - 8.8.4.4

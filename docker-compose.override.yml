@@ -2,6 +2,7 @@ services:
   resource-service:
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq/
+      - GEMINI_API_KEY=${GEMINI_API_KEY}  # Pass through from host environment
     depends_on:
       rabbitmq:
         condition: service_healthy

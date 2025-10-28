@@ -22,6 +22,7 @@ class ResourceUpdate(ResourceBase):
 class ResourcePatch(BaseModel):
     name: Optional[str] = None
     type: Optional[str] = None
+    indicator_id: Optional[str] = None
 
 
 class Resource(ResourceBase):

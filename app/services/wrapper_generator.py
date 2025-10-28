@@ -297,11 +297,34 @@ class WrapperGenerator:
 
         try:
             print("Calling Gemini...")
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=prompt
-            )
-            generated_code = response.text.strip()
+            # Retry logic for transient network/DNS failures
+            max_retries = 3
+            retry_delay = 2  # seconds
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    response = await self.client.aio.models.generate_content(
+                        model=self.model_name,
+                        contents=prompt
+                    )
+                    generated_code = response.text.strip()
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_exception = e
+                    error_str = str(e).lower()
+                    # Retry only on network/DNS errors
+                    if any(x in error_str for x in ['name resolution', 'connection', 'timeout', 'network']):
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                            print(f"Network error on attempt {attempt + 1}/{max_retries}, retrying in {wait_time}s: {e}")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            print(f"Failed after {max_retries} attempts")
+                            raise
+                    else:
+                        # Non-network error, don't retry
+                        raise
             
             # Log prompt and response in debug mode
             self.debug_logger.log_prompt_response(
