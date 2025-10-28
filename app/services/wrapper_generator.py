@@ -336,6 +336,9 @@ class WrapperGenerator:
             # Clean markdown code block markers if present
             generated_code = self._clean_code_response(generated_code)
             
+            # Post-process to fix common API response handling issues
+            generated_code = self._fix_common_api_bugs(generated_code)
+            
             # Verify that the code was actually customized (not just the template)
             template_code = get_wrapper_template(source_config.source_type, indicator_metadata.periodicity)
             if generated_code == template_code:
@@ -391,6 +394,25 @@ class WrapperGenerator:
         
         # Strip any remaining whitespace
         code = code.strip()
+        
+        return code
+    
+    def _fix_common_api_bugs(self, code: str) -> str:
+        """
+        Post-process generated code to fix common API response handling bugs
+        """
+        import re
+        
+        # Fix: Handle APIs that return an array wrapper around the main object
+        # Pattern: json_data.get('SomeKey') where json_data might be a list
+        # Replace with: Extract first element if list, then access key
+        
+        # Find all patterns like: json_data.get('Dados')
+        # And add safety check for list wrapper
+        pattern = r"(\s+)(json_data)\s*=\s*response\.json\(\)"
+        replacement = r"\1\2 = response.json()\n\1# Handle APIs that return array wrapper [{ ... }]\n\1if isinstance(\2, list) and len(\2) > 0:\n\1    \2 = \2[0]"
+        
+        code = re.sub(pattern, replacement, code)
         
         return code
 

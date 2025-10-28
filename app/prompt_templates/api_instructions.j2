@@ -11,7 +11,10 @@ REQUIRED METHODS TO CUSTOMIZE:
 1. fetch_date_range(start_date, end_date): Fetch specific date ranges
    - Make API calls with date parameters
    - Handle response parsing and data extraction
-   - Use RateLimitHandler: await self.rate_limiter.handle_rate_limit(response)
+   - CORRECT way to use rate limiter:
+     response = requests.get(url, headers=headers, params=params)
+     await self.rate_limiter.handle_rate_limit(response)
+   - DO NOT call: self.rate_limiter.make_request() - this method does not exist!
 
 2. get_interval_seconds(): Convert periodicity to seconds
    - Return appropriate interval based on {{ periodicity }} periodicity
@@ -21,6 +24,12 @@ REQUIRED METHODS TO CUSTOMIZE:
    - For APIs: Use same logic as fetch_date_range() but for current data
    - Make real API calls, do NOT use random.uniform() or mock data
    - Return actual data from the API, not placeholder values
+   - CORRECT way to make requests:
+     response = requests.get(url, headers=headers, params=params)
+     await self.rate_limiter.handle_rate_limit(response)
+     if response.status_code == 200:
+         json_data = response.json()
+   - DO NOT call: self.rate_limiter.make_request() - this method does not exist!
 
 *** INDICATOR NAME HANDLING ***:
 - Analyze DATA SAMPLE for indicator name variations
@@ -34,9 +43,11 @@ ERROR HANDLING - CRITICAL:
 - Use RateLimitHandler to handle 429 automatically: await self.rate_limiter.handle_rate_limit(response)
 
 JSON RESPONSE HANDLING (analyze DATA SAMPLE structure):
+- ALWAYS check type first: if isinstance(json_data, list)
 - Direct list: measurements = json_data (if response is [...])
 - Nested data: measurements = json_data.get('data', []) or json_data.get('results', [])
-- Handle both formats: if isinstance(json_data, list): measurements = json_data
+- Use .get() with defaults: json_data.get('Dados', {}) NOT json_data['Dados']
+- CRITICAL: Never call .get() on lists - check isinstance(json_data, dict) first
 - Common data keys: 'timestamp'/'time'/'date' for datetime, 'value'/'measurement' for numeric
 - Date-keyed objects: If DATA SAMPLE shows structure like {"Janeiro de 2011": [...], "Fevereiro de 2011": [...]}, iterate through .items() to get date keys and data arrays
 
