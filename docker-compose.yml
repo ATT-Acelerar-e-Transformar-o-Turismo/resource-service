@@ -10,6 +10,11 @@ services:
       - resource-mongo
     networks:
       - resource-network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    volumes:
+      - resource_uploads:/app/uploads
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
@@ -44,6 +49,7 @@ services:
 
 volumes:
   resource_db:
+  resource_uploads:
 
 networks:
   resource-network:

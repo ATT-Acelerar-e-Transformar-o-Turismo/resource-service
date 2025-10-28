@@ -14,6 +14,7 @@ from services.resource_service import create_resource
 from services.async_wrapper_runner import AsyncWrapperRunner
 from services.abc.wrapper_runner import WrapperRunner
 from services.wrapper_process_manager import wrapper_process_manager
+from services.file_service import file_service
 from schemas.wrapper import (
     WrapperGenerationRequest, GeneratedWrapper, WrapperStatus, 
     WrapperExecutionResult
@@ -84,9 +85,12 @@ class WrapperService:
                     data_points_sent=None,
                     execution_time=datetime.utcnow().isoformat()
                 )
-            
+
             wrapper = GeneratedWrapper(**wrapper_doc)
-            
+
+            # Resolve file paths for file-based sources
+            wrapper.source_config = await self._resolve_file_path(wrapper.source_config)
+
             # Execute wrapper using the runner adapter
             result = await self.runner.execute_wrapper(wrapper)
             
@@ -150,24 +154,47 @@ class WrapperService:
             logger.error(f"Database operation failed in list_wrappers: {e}")
             raise
 
+    async def _resolve_file_path(self, source_config: DataSourceConfig) -> DataSourceConfig:
+        """Resolve file_id to actual file path for file-based sources"""
+        if source_config.source_type.value in ["CSV", "XLSX", "XLS"]:
+            # Check both location and file_id fields for the file_id
+            file_id = source_config.location or source_config.file_id
+
+            if not file_id:
+                raise Exception("No file_id provided in source_config.location or source_config.file_id")
+
+            # Get file information from database
+            uploaded_file = await file_service.get_uploaded_file(file_id)
+            if not uploaded_file:
+                raise Exception(f"Uploaded file {file_id} not found")
+
+            # Update location to actual file path
+            source_config.location = uploaded_file.file_path
+            logger.info(f"Resolved file_id {file_id} to path {uploaded_file.file_path}")
+
+        return source_config
+
     async def process_wrapper_creation(self, message_data: dict):
         """Process wrapper creation task - this runs in the consumer"""
         wrapper_id = message_data["wrapper_id"]
         auto_create_resource = message_data["auto_create_resource"]
-        
+
         try:
             logger.info(f"Processing wrapper creation {wrapper_id}")
-            
+
             # Get the wrapper record
             wrapper_doc = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})
             if not wrapper_doc:
                 raise Exception(f"Wrapper {wrapper_id} not found")
-            
+
             wrapper = GeneratedWrapper(**wrapper_doc)
-            
+
+            # Step 0: Resolve file paths for file-based sources
+            wrapper.source_config = await self._resolve_file_path(wrapper.source_config)
+
             # Step 1: Update status to generating
             await self._update_wrapper_status(wrapper_id, WrapperStatus.GENERATING)
-            
+
             # Step 2: Generate wrapper code
             generated_code = await self.generator.generate_wrapper(
                 wrapper.metadata, wrapper.source_config, wrapper_id
