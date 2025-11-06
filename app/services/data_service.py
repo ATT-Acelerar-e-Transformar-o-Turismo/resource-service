@@ -29,7 +29,6 @@ async def create_data_segment(
         await db.data_segments.insert_one(new_datasegment.model_dump())
 
         # Merge logic with created_at-based override
-        # For multi-series resources, key by (x, series) instead of just x
         all_points_cursor = db.data_segments.find(
             {"resource_id": resource_id}, {"points": 1, "created_at": 1, "_id": 0}
         )
@@ -41,34 +40,23 @@ async def create_data_segment(
                 continue
             for point in segment.get("points", []):
                 x_val = point["x"]
-                series_val = point.get("series")  # None for single-series resources
-                
-                # Create composite key: (x, series) for multi-series, just x for single-series
-                key = (x_val, series_val) if series_val else x_val
-                
                 if (
-                    key not in points_map
-                    or segment_created_at > points_map[key]["created_at"]
+                    x_val not in points_map
+                    or segment_created_at > points_map[x_val]["created_at"]
                 ):
-                    points_map[key] = {
+                    points_map[x_val] = {
                         "x": x_val,
                         "y": point["y"],
-                        "series": series_val,
                         "created_at": segment_created_at,
                     }
 
         if not points_map:
             return new_datasegment
 
-        merged_points = sorted(list(points_map.values()), key=lambda p: (p.get("series") or "", p["x"]))
+        merged_points = sorted(list(points_map.values()), key=lambda p: p["x"])
 
-        # Remove created_at from merged_points before storing, preserve series if present
-        merged_data_points = []
-        for p in merged_points:
-            point_dict = {"x": p["x"], "y": p["y"]}
-            if p.get("series"):
-                point_dict["series"] = p["series"]
-            merged_data_points.append(point_dict)
+        # Remove created_at from merged_points before storing
+        merged_data_points = [{"x": p["x"], "y": p["y"]} for p in merged_points]
 
         # Store merged data
         await db.resources_data.update_one(
@@ -110,7 +98,7 @@ async def get_data_by_resource_id(
         pipeline = [
             {"$match": {"resource_id": resource_id}},
             {"$unwind": "$data"},
-            {"$project": {"x": "$data.x", "y": "$data.y", "series": "$data.series", "_id": 0}},
+            {"$project": {"x": "$data.x", "y": "$data.y", "_id": 0}},
         ]
 
         match_filter = {}
