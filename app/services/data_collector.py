@@ -47,18 +47,12 @@ async def process_collected_data(message: aio_pika.abc.AbstractIncomingMessage):
                 return
             logger.debug(f"Data segment created successfully: {data_segment}")
 
-            # NOTE: Resource data is NOT propagated to indicator's merged_indicators
-            # Indicators should display resource data via the resources relationship
-            # This prevents data duplication when both indicator and resource data are shown
-            # If you need indicator-level aggregated data, use a dedicated endpoint
-            
-            # REMOVED: Publishing to RESOURCE_DATA_QUEUE
-            # await rabbitmq_client.publish(
-            #     settings.RESOURCE_DATA_QUEUE, json.dumps({
-            #         "resource_id": str(resource["_id"]),
-            #         "data": points_data
-            #     })
-            # )
+            await rabbitmq_client.publish(
+                    settings.RESOURCE_DATA_QUEUE, json.dumps({
+                        "resource_id": str(resource["_id"]),
+                        "data": points_data
+                        })
+                    )
 
         except json.JSONDecodeError:
             logger.error("Invalid JSON format, discarding message.")
