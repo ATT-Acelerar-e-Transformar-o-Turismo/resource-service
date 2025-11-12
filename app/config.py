@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     )
     DATA_QUEUE_NAME: str = Field(default="data_queue", env="DATA_QUEUE_NAME")
 
+    WRAPPER_CREATION_QUEUE_NAME: str = Field(default="wrapper_creation_queue", env="WRAPPER_CREATION_QUEUE_NAME")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

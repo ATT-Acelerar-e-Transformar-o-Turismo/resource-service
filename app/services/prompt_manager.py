@@ -13,19 +13,19 @@ class PromptManager:
             lstrip_blocks=True
         )
     
-    def generate_wrapper_prompt(self, indicator_metadata, source_config, wrapper_id: str, data_sample: str) -> str:
+    def generate_wrapper_prompt(self, indicator_metadata, source_config, source_type: str, wrapper_id: str, data_sample: str) -> str:
         """Generate wrapper prompt using templates - exact same logic as before, just templated"""
         # Get the main template
         template = self.env.get_template("wrapper_generation.j2")
-        
+
         # Get source-specific instructions using templates
         source_specific_instructions = self._get_source_specific_instructions(
-            source_config.source_type, 
+            source_type,
             indicator_metadata.periodicity
         )
-        
+
         # Get wrapper template using Jinja2
-        wrapper_template = self._get_wrapper_template(source_config.source_type, indicator_metadata.periodicity)
+        wrapper_template = self._get_wrapper_template(source_type, indicator_metadata.periodicity)
         
         # Render the template - exact same variables as the f-string
         return template.render(

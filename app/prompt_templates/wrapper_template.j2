@@ -9,7 +9,8 @@ from utils import RateLimitHandler, mask_credentials, HistoricalDataFetcher, Mes
 {{ additional_imports }}
 
 class ATTWrapper:
-    def __init__(self, wrapper_id: int, rabbitmq_url: str = None):
+    def __init__(self, wrapper_id: str, rabbitmq_url: str = None):
+        # CRITICAL: wrapper_id is always a STRING (UUID), never an integer
         self.wrapper_id = wrapper_id
         self.rabbitmq_url = rabbitmq_url or os.getenv('AMQP_URL', 'amqp://guest:guest@localhost/')
         self.source_type = "{{ source_type }}"
@@ -36,15 +37,17 @@ class ATTWrapper:
     async def fetch_historical_data(self) -> List[Dict[str, Any]]:
         """
         Fetch historical data from API with date range parameters
-        
+
         *** DO NOT MODIFY THIS METHOD ***
         This method uses the HistoricalDataFetcher utility for optimal batch processing.
         Only customize fetch_date_range() and fetch_external_data() methods.
         """
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Starting historical data fetch...")
         total_points_sent = await self.historical_fetcher.fetch_all_historical_data(
             fetch_date_range_func=self.fetch_date_range,
             send_to_queue_func=self.send_to_queue
         )
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Completed historical data fetch - {total_points_sent} data points sent")
         return []  # Return empty list since data was already sent to queue
     
     async def fetch_date_range(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
@@ -53,7 +56,7 @@ class ATTWrapper:
         # if not specified, use all these parameters to guarantee that the data is fetched correctly
         # ?from=2025-01-01&to=2025-01-31&start=2025-01-01&end=2025-01-31&startdate=2025-01-01&enddate=2025-01-31
         
-        print(f"Wrapper {self.wrapper_id}: Fetching historical data from {start_date} to {end_date}...")
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Fetching historical data from {start_date} to {end_date}...")
         
         # Example of using the rate limit handler with Response object:
         # response = requests.get(url, headers=headers, params=params)
@@ -70,44 +73,53 @@ class ATTWrapper:
         [{'x': 'YYYY-MM-DD HH:MM:SS', 'y': VALUE}, ...]
         """
         # PLACEHOLDER: Replace this with actual data fetching logic
-        
+
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Starting current data fetch from {self.source_type} source...")
+
         try:
             # PLACEHOLDER FOR SOURCE-SPECIFIC IMPLEMENTATION
             ...
-            
+
             # Mock data for demonstration - replace with actual logic
             base_time = datetime.now()
             data_points = []
-            
+
             for i in range(10):
                 point_time = base_time + timedelta(minutes=i * 5)
                 data_points.append({
                     "x": point_time.isoformat(),
                     "y": random.uniform(0, 100)
                 })
-                
+
+            print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Successfully fetched {len(data_points)} data points")
             return data_points
-            
+
         except Exception as e:
-            print(f"Error fetching external data: {str(e)}")
+            print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Error fetching external data: {str(e)}")
             raise
     
     async def send_to_queue(self, data_points: List[Dict[str, Any]]):
         """Send formatted data to RabbitMQ queue"""
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Publishing {len(data_points)} data points to queue...")
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Message content: {data_points}")
         await self.message_sender.send_to_queue(data_points)
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Successfully published message to queue")
     
     async def run_once(self):
         """Execute one cycle of data fetching and sending"""
-        print(f"Wrapper {self.wrapper_id}: Starting data fetch for {self.source_type} source.")
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Starting data fetch cycle for {self.source_type} source")
         data_points = await self.fetch_external_data()
         if data_points:
             await self.send_to_queue(data_points)
+            print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Completed data fetch cycle successfully")
         else:
-            print(f"Wrapper {self.wrapper_id}: No data to send")
+            print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: No data to send")
             raise Exception("No data points were fetched from the source")
     
     async def run_continuous(self):
         """Run the wrapper continuously with intervals based on periodicity"""
+        interval_seconds = self.get_interval_seconds()
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Starting continuous execution with {self.periodicity} periodicity ({interval_seconds} seconds)")
         await self.continuous_executor.run_continuous(
             run_once_func=self.run_once,
             fetch_historical_func=self.fetch_historical_data if not self.historical_data_fetched else None,
@@ -117,10 +129,28 @@ class ATTWrapper:
 # Entry point for generated wrapper
 if __name__ == "__main__":
     import sys
-    
-    wrapper_id = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+
+    print(f"[{datetime.now().isoformat()}] Wrapper starting with args: {sys.argv}")
+
+    if len(sys.argv) < 3:
+        raise ValueError("wrapper_id and source_config are required as arguments")
+    wrapper_id = sys.argv[1]
+    source_config_json = sys.argv[2]
+
+    # Parse source config
+    import json
+    try:
+        source_config = json.loads(source_config_json)
+    except json.JSONDecodeError:
+        raise ValueError("source_config must be valid JSON")
+
     wrapper = ATTWrapper(wrapper_id)
-    
+
+    # Check for skip-historical flag (for service restarts)
+    if len(sys.argv) > 3 and sys.argv[3] == "--skip-historical":
+        wrapper.historical_data_fetched = True
+        print(f"[{datetime.now().isoformat()}] Wrapper {wrapper_id}: Skipping historical data fetch (restart mode)")
+
     # Determine execution mode based on source type
     if wrapper.source_type in ["CSV", "XLSX"]:
         print(f"File source ({wrapper.source_type}) detected - running once")

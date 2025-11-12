@@ -241,21 +241,23 @@ class WrapperGenerator:
         except Exception as e:
             return f"Unexpected error: {str(e)}"
 
-    async def generate_wrapper(self, 
+    async def generate_wrapper(self,
                              indicator_metadata: IndicatorMetadata,
                              source_config: DataSourceConfig,
+                             source_type: str,
                              wrapper_id: str) -> str:
         """
         Use Gemini to generate a customized wrapper based on indicator metadata and source configuration
+        Note: source_config.location is always populated (computed from file_id for CSV/XLSX in the route handler)
         """
-        
+
         # Get data sample based on source type
-        print(f"Extracting sample from {source_config.source_type} source...")
-        if source_config.source_type == "CSV":
+        print(f"Extracting sample from {source_type} source...")
+        if source_type == "CSV":
             data_sample = self.get_csv_sample(source_config.location)
-        elif source_config.source_type == "XLSX":
+        elif source_type == "XLSX":
             data_sample = self.get_xlsx_sample(source_config.location)
-        elif source_config.source_type == "API":
+        elif source_type == "API":
             # Convert new API config format to legacy auth_config for compatibility
             auth_config = {}
             if source_config.auth_type == "api_key" and source_config.api_key:
@@ -281,14 +283,14 @@ class WrapperGenerator:
         print(f"Data sample: {data_sample[:400]}" + "..." if len(data_sample) > 400 else "")
 
         prompt = self.prompt_manager.generate_wrapper_prompt(
-            indicator_metadata, source_config, wrapper_id, data_sample
+            indicator_metadata, source_config, source_type, wrapper_id, data_sample
         )
 
         # Prepare metadata for debug
         debug_metadata = {
             "wrapper_id": wrapper_id,
             "indicator_name": indicator_metadata.name,
-            "source_type": source_config.source_type,
+            "source_type": source_type,
             "source_location": source_config.location,
             "timestamp": datetime.now().isoformat(),
             "prompt_length": len(prompt),
@@ -314,7 +316,7 @@ class WrapperGenerator:
             generated_code = self._clean_code_response(generated_code)
             
             # Verify that the code was actually customized (not just the template)
-            template_code = get_wrapper_template(source_config.source_type, indicator_metadata.periodicity)
+            template_code = get_wrapper_template(source_type, indicator_metadata.periodicity)
             if generated_code == template_code:
                 error_msg = "Gemini returned unchanged template"
                 
@@ -372,21 +374,23 @@ class WrapperGenerator:
         return code
 
 
-    def save_wrapper(self, wrapper_code: str, wrapper_id: int, indicator_name: str) -> str:
+    def save_wrapper(self, wrapper_code: str, wrapper_id: str) -> str:
         """
-        Save the generated wrapper to a file with indicator name
+        Save the generated wrapper to a file
         """
-        # Clean indicator name for filename
-        clean_name = "".join(c for c in indicator_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        clean_name = clean_name.replace(' ', '_').lower()
-        
-        filename = f"wrapper_{wrapper_id}_{clean_name}.py"
-        
-        with open(filename, 'w', encoding='utf-8') as f:
+        # Create wrappers directory
+        wrapper_dir = "/app/generated_wrappers"
+        os.makedirs(wrapper_dir, exist_ok=True)
+
+        # Simple filename pattern
+        filename = f"{wrapper_id}.py"
+        file_path = os.path.join(wrapper_dir, filename)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
             f.write(wrapper_code)
-        
-        print(f"Wrapper saved to: {filename}")
-        return filename
+
+        print(f"Wrapper saved to: {file_path}")
+        return file_path
 
     async def execute_wrapper(self, wrapper_file: str, wrapper_id: int, mode: str = "once", timeout_seconds: int = 8):
         """

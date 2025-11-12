@@ -11,11 +11,13 @@ from dependencies.database import db
 from dependencies.rabbitmq import consumer, rabbitmq_client
 from services.wrapper_generator import WrapperGenerator, IndicatorMetadata, DataSourceConfig
 from services.resource_service import create_resource
-from services.async_wrapper_runner import AsyncWrapperRunner
 from services.abc.wrapper_runner import WrapperRunner
+from services.abc.wrapper_monitor import WrapperMonitor
+from services.wrapper_process_manager import wrapper_process_manager
+from services.process_wrapper_runner import ProcessWrapperRunner
 from schemas.wrapper import (
-    WrapperGenerationRequest, GeneratedWrapper, WrapperStatus, 
-    WrapperExecutionResult
+    WrapperGenerationRequest, GeneratedWrapper, WrapperStatus,
+    WrapperExecutionResult, SourceType
 )
 from schemas.resource import ResourceCreate
 from config import settings
@@ -25,43 +27,51 @@ import logging
 logger = logging.getLogger(__name__)
 
 class WrapperService:
-    def __init__(self):
-        # Type annotation for the runner using the Protocol
-        self.runner: WrapperRunner
-        self.generator = WrapperGenerator(
-            gemini_api_key=settings.GEMINI_API_KEY,
-            rabbitmq_url=settings.DATA_RABBITMQ_URL,
-            debug_mode=False,
-            debug_dir="prompts"
-        )
-        self.runner = AsyncWrapperRunner()
-        self.queue_name = "wrapper_creation_queue"
-    
+    def __init__(
+        self,
+        runner: WrapperRunner,
+        generator: WrapperGenerator
+    ):
+        self._runner = runner
+        self.generator = generator
+        self.queue_name = settings.WRAPPER_CREATION_QUEUE_NAME
+
 
     async def generate_and_store_wrapper(self, request: WrapperGenerationRequest) -> GeneratedWrapper:
-        """Queue wrapper creation asynchronously - all wrapper creation goes through queue"""
+        """Create wrapper and resource synchronously, then queue wrapper execution"""
         try:
-            # Generate unique wrapper ID
             wrapper_id = str(uuid.uuid4())
-            
-            # Create initial wrapper record with pending status
+
             wrapper = GeneratedWrapper(
                 wrapper_id=wrapper_id,
                 metadata=request.metadata,
+                source_type=request.source_type,
                 source_config=request.source_config,
                 status=WrapperStatus.PENDING
             )
+
+            insert_result = await db.generated_wrappers.insert_one(wrapper.model_dump())
+            logger.info(f"Created wrapper {wrapper_id} with ObjectId {insert_result.inserted_id}")
+
+            resource_id = None
+            if request.auto_create_resource:
+                resource = await create_resource(ResourceCreate(
+                    name=request.metadata.name,
+                    type="sustainability_indicator",
+                    wrapper_id=wrapper_id
+                ))
+                resource_id = resource["id"] if resource else None
+                logger.info(f"Created resource {resource_id} for wrapper {wrapper_id}")
+
+                await db.generated_wrappers.update_one(
+                    {"wrapper_id": wrapper_id},
+                    {"$set": {"resource_id": resource_id, "updated_at": datetime.utcnow()}}
+                )
+
+            wrapper.resource_id = resource_id
             
-            await db.generated_wrappers.insert_one(wrapper.model_dump())
-            logger.info(f"Created wrapper {wrapper_id} for async processing")
-            
-            # Send message to queue with wrapper_id and auto_create_resource flag
-            queue_message = {
-                "wrapper_id": wrapper_id,
-                "auto_create_resource": request.auto_create_resource
-            }
-            await rabbitmq_client.publish(self.queue_name, json.dumps(queue_message))
-            
+            await rabbitmq_client.publish(self.queue_name, json.dumps({"wrapper_id": wrapper_id}))
+
             return wrapper
             
         except Exception as e:
@@ -86,8 +96,8 @@ class WrapperService:
             
             wrapper = GeneratedWrapper(**wrapper_doc)
             
-            # Execute wrapper using the runner adapter
-            result = await self.runner.execute_wrapper(wrapper)
+            # Execute wrapper using the configured runner
+            result = await self._runner.execute_wrapper(wrapper)
             
             # Update database based on execution result
             if result.success:
@@ -152,7 +162,6 @@ class WrapperService:
     async def process_wrapper_creation(self, message_data: dict):
         """Process wrapper creation task - this runs in the consumer"""
         wrapper_id = message_data["wrapper_id"]
-        auto_create_resource = message_data["auto_create_resource"]
         
         try:
             logger.info(f"Processing wrapper creation {wrapper_id}")
@@ -160,7 +169,13 @@ class WrapperService:
             # Get the wrapper record
             wrapper_doc = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})
             if not wrapper_doc:
-                raise Exception(f"Wrapper {wrapper_id} not found")
+                logger.error(f"Wrapper {wrapper_id} not found in database")
+                # Check if wrapper exists with different query
+                all_wrappers = await db.generated_wrappers.find({}).to_list(None)
+                logger.error(f"Total wrappers in database: {len(all_wrappers)}")
+                recent_wrappers = [w.get("wrapper_id") for w in all_wrappers[-5:]]
+                logger.error(f"Recent wrapper IDs: {recent_wrappers}")
+                raise Exception(f"Wrapper with ID '{wrapper_id}' does not exist")
             
             wrapper = GeneratedWrapper(**wrapper_doc)
             
@@ -169,7 +184,7 @@ class WrapperService:
             
             # Step 2: Generate wrapper code
             generated_code = await self.generator.generate_wrapper(
-                wrapper.metadata, wrapper.source_config, wrapper_id
+                wrapper.metadata, wrapper.source_config, wrapper.source_type.value, wrapper_id
             )
             
             # Update wrapper with generated code
@@ -183,32 +198,15 @@ class WrapperService:
                 }
             )
             logger.info(f"Generated code for wrapper {wrapper_id}")
-            
-            # Step 3: Create resource if requested
-            resource_id = None
-            if auto_create_resource:
-                await self._update_wrapper_status(wrapper_id, WrapperStatus.CREATING_RESOURCE)
-                
-                resource_data = ResourceCreate(
-                    name=wrapper.metadata.name,
-                    type="sustainability_indicator",
-                    wrapper_id=wrapper_id
-                )
-                resource = await create_resource(resource_data)
-                resource_id = resource["id"] if resource else None
-                logger.info(f"Created resource {resource_id} for wrapper {wrapper_id}")
-                
-                # Update wrapper with resource_id
-                await db.generated_wrappers.update_one(
-                    {"wrapper_id": wrapper_id},
-                    {
-                        "$set": {
-                            "resource_id": resource_id,
-                            "updated_at": datetime.utcnow()
-                        }
-                    }
-                )
-            
+
+            # Save generated code to file for process execution
+            wrapper_file_path = self.generator.save_wrapper(generated_code, wrapper_id)
+            logger.info(f"Saved wrapper code to file: {wrapper_file_path}")
+
+            # Step 3: Resource already created in generate_and_store_wrapper
+            resource_id = wrapper.resource_id
+            logger.info(f"Using existing resource {resource_id} for wrapper {wrapper_id}")
+
             # Step 4: Execute wrapper
             await self._update_wrapper_status(wrapper_id, WrapperStatus.EXECUTING)
             
@@ -217,43 +215,44 @@ class WrapperService:
                 wrapper_id=wrapper_id,
                 resource_id=resource_id,
                 metadata=wrapper.metadata,
+                source_type=wrapper.source_type,
                 source_config=wrapper.source_config,
                 generated_code=generated_code,
                 status=WrapperStatus.EXECUTING
             )
-            
-            # Handle execution based on source type
-            if wrapper.source_config.source_type.value == "API":
-                # For API sources: start continuous execution (don't wait for completion)
-                logger.info(f"Starting continuous execution for API wrapper {wrapper_id}")
-                # Execute once to test, then let it run continuously in background
-                execution_result = await self.runner.execute_wrapper(updated_wrapper)
-                
-                # Mark as completed (continuously running)
+
+            # Execute wrapper using the configured runner
+            execution_result = await self._runner.execute_wrapper(updated_wrapper)
+            logger.info(f"Executed wrapper {wrapper_id} with {type(self._runner).__name__}")
+
+            # Update database based on execution result
+            if execution_result.success:
+                # For API wrappers, they run continuously, so mark as EXECUTING
+                # For file wrappers, they complete immediately, so mark as COMPLETED
+                status = WrapperStatus.EXECUTING if wrapper.source_type == SourceType.API else WrapperStatus.COMPLETED
+                completed_at = datetime.utcnow() if status == WrapperStatus.COMPLETED else None
+
+                update_data = {
+                    "status": status.value,
+                    "execution_result": execution_result.model_dump(),
+                    "updated_at": datetime.utcnow()
+                }
+                if completed_at:
+                    update_data["completed_at"] = completed_at
+
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id},
-                    {
-                        "$set": {
-                            "status": WrapperStatus.COMPLETED.value,
-                            "execution_result": execution_result.model_dump(),
-                            "completed_at": datetime.utcnow(),
-                            "updated_at": datetime.utcnow()
-                        }
-                    }
+                    {"$set": update_data}
                 )
-                logger.info(f"API wrapper {wrapper_id} started successfully and running continuously")
             else:
-                # For file sources (CSV/XLSX): execute once
-                execution_result = await self.runner.execute_wrapper(updated_wrapper)
-                logger.info(f"Executed file wrapper {wrapper_id}")
-                
-                # Mark as completed
+                # Mark as error regardless of source type
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id},
                     {
                         "$set": {
-                            "status": WrapperStatus.COMPLETED.value,
+                            "status": WrapperStatus.ERROR.value,
                             "execution_result": execution_result.model_dump(),
+                            "error_message": execution_result.message,
                             "completed_at": datetime.utcnow(),
                             "updated_at": datetime.utcnow()
                         }
@@ -292,9 +291,182 @@ class WrapperService:
             logger.error(f"Failed to update wrapper status: {e}")
             raise
 
+    async def stop_wrapper_execution(self, wrapper_id: str) -> bool:
+        """Stop a wrapper (universal method - internal logic varies by type)
+
+        Args:
+            wrapper_id: ID of wrapper to stop
+
+        Returns:
+            bool: True if wrapper stopped successfully
+        """
+        try:
+            wrapper = await self.get_wrapper(wrapper_id)
+            if not wrapper:
+                logger.warning(f"Wrapper {wrapper_id} not found for stop operation")
+                return False
+
+            monitor = self._runner.get_monitor()
+            success = await monitor.stop_wrapper(wrapper_id)
+
+            if success:
+                logger.info(f"Successfully stopped wrapper {wrapper_id}")
+            else:
+                logger.warning(f"Failed to stop wrapper {wrapper_id}")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Error stopping wrapper {wrapper_id}: {e}")
+            return False
+
+    async def get_wrapper_health_status(self, wrapper_id: str) -> str:
+        """Get current health status of wrapper (universal method)
+
+        Args:
+            wrapper_id: ID of wrapper to check
+
+        Returns:
+            str: Health status (HEALTHY, STALLED, DEGRADED, CRASHED, UNKNOWN)
+        """
+        try:
+            wrapper = await self.get_wrapper(wrapper_id)
+            if not wrapper:
+                return "UNKNOWN"
+
+            monitor = self._runner.get_monitor()
+            return await monitor.get_health_status(wrapper_id)
+
+        except Exception as e:
+            logger.error(f"Error getting health status for wrapper {wrapper_id}: {e}")
+            return "UNKNOWN"
+
+    async def get_wrapper_monitoring_details(self, wrapper_id: str) -> dict:
+        try:
+            wrapper = await self.get_wrapper(wrapper_id)
+            if not wrapper:
+                return {"error": "Wrapper not found"}
+
+            monitor = self._runner.get_monitor()
+            return await monitor.get_monitoring_details(wrapper_id)
+
+        except Exception as e:
+            logger.error(f"Error getting monitoring details for wrapper {wrapper_id}: {e}")
+            return {"error": str(e)}
+
+    async def get_wrapper_logs(self, wrapper_id: str, limit: int = 100) -> list:
+        """Get wrapper logs from log files (universal method)
+
+        Args:
+            wrapper_id: ID of wrapper to get logs for
+            limit: Maximum number of log lines to return
+
+        Returns:
+            list: Log lines from log files
+        """
+        try:
+            wrapper = await self.get_wrapper(wrapper_id)
+            if not wrapper:
+                return ["Error: Wrapper not found"]
+
+            monitor = self._runner.get_monitor()
+            return await monitor.get_logs(wrapper_id, limit)
+
+        except Exception as e:
+            logger.error(f"Error getting logs for wrapper {wrapper_id}: {e}")
+            return [f"Error reading logs: {str(e)}"]
+
+    async def is_wrapper_actively_executing(self, wrapper_id: str) -> bool:
+        """Check if wrapper is actively executing (universal method)
+
+        Args:
+            wrapper_id: ID of wrapper to check
+
+        Returns:
+            bool: True if wrapper is actively executing
+        """
+        try:
+            wrapper = await self.get_wrapper(wrapper_id)
+            if not wrapper:
+                return False
+
+            monitor = self._runner.get_monitor()
+            return await monitor.is_actively_executing(wrapper_id)
+
+        except Exception as e:
+            logger.error(f"Error checking if wrapper {wrapper_id} is executing: {e}")
+            return False
+
+    async def restart_executing_wrappers(self):
+        """Restart continuous wrappers that were executing before service restart"""
+        try:
+            executing_wrappers = await db.generated_wrappers.find(
+                {"status": "executing"}
+            ).to_list(length=None)
+
+            if not executing_wrappers:
+                logger.info("No executing wrappers found to restart")
+                return
+
+            restarted_count = 0
+
+            for wrapper_doc in executing_wrappers:
+                try:
+                    wrapper = GeneratedWrapper(**wrapper_doc)
+
+                    # Only restart API wrappers (continuous)
+                    if wrapper.source_type.value != "API":
+                        continue
+
+                    # Check if wrapper file exists
+                    wrapper_file_path = f"/app/generated_wrappers/{wrapper.wrapper_id}.py"
+                    if not os.path.exists(wrapper_file_path):
+                        await self._update_wrapper_status(
+                            wrapper.wrapper_id,
+                            WrapperStatus.ERROR,
+                            "Wrapper file not found after service restart"
+                        )
+                        continue
+
+                    logger.info(f"Restarting wrapper {wrapper.wrapper_id}")
+
+                    # Execute with skip-historical flag
+                    execution_result = await self._runner.execute_wrapper(wrapper, skip_historical=True)
+
+                    if execution_result.success:
+                        restarted_count += 1
+
+                except Exception as e:
+                    logger.error(f"Error restarting wrapper {wrapper_doc.get('wrapper_id', 'unknown')}: {e}")
+
+            logger.info(f"Restarted {restarted_count} wrappers")
+
+        except Exception as e:
+            logger.error(f"Error during restart of executing wrappers: {e}")
+
+
+def create_wrapper_service() -> WrapperService:
+    """Factory function to create WrapperService with proper dependencies."""
+
+    # Create single runner (ProcessWrapperRunner handles all source types)
+    runner = ProcessWrapperRunner(wrapper_process_manager)
+
+    # Create generator
+    generator = WrapperGenerator(
+        gemini_api_key=settings.GEMINI_API_KEY,
+        rabbitmq_url=settings.DATA_RABBITMQ_URL,
+        debug_mode=True,
+        debug_dir="/app/prompts"
+    )
+
+    return WrapperService(
+        runner=runner,
+        generator=generator
+    )
+
 
 # Global instance
-wrapper_service = WrapperService()
+wrapper_service = create_wrapper_service()
 
 # Consumer function using the decorator pattern
 @consumer("wrapper_creation_queue")
