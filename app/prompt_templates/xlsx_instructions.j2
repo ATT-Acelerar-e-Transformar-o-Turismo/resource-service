@@ -4,6 +4,10 @@ XLSX IMPLEMENTATION:
 - Handle multiple sheets (usually first sheet)
 - File runs once, periodicity ({{ periodicity }}) is reference only
 
+SOURCE CONFIG SCHEMA (XLSXSourceConfig):
+- file_id: str (File ID for uploaded XLSX file)
+- location: Optional[str] (Computed file path, populated by backend)
+
 DATETIME PATTERNS:
 - Years (2004, 2005): format='%Y' → '%Y-01-01T00:00:00'
 - Dates (2004-01-01): format='%Y-%m-%d' → '%Y-%m-%dT00:00:00'

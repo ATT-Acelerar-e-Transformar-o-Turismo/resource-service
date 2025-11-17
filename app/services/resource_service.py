@@ -33,6 +33,13 @@ async def get_resource_by_id(resource_id: str) -> Optional[dict]:
 
 async def create_resource(resource_data: ResourceCreate) -> Optional[dict]:
     try:
+        wrapper_id = resource_data.wrapper_id
+
+        wrapper = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})
+        if not wrapper:
+            logger.error(f"Resource creation failed - wrapper_id '{wrapper_id}' does not exist")
+            raise ValueError(f"Wrapper with ID '{wrapper_id}' does not exist")
+
         resource_dict = deserialize(resource_data.dict())
         resource_dict["deleted"] = False
         resource_dict["startPeriod"] = None
