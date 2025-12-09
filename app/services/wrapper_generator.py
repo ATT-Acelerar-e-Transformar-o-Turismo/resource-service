@@ -127,7 +127,7 @@ class DebugLogger:
             print(f"Error saving debug error for wrapper {wrapper_id}: {e}")
 
 class WrapperGenerator:
-    def __init__(self, gemini_api_key: str, rabbitmq_url: str = "amqp://guest:guest@localhost/", debug_mode: bool = False, debug_dir: str = "prompts", model_name: str = "gemini-2.5-flash-preview-05-20"):
+    def __init__(self, gemini_api_key: str, rabbitmq_url: str = "amqp://guest:guest@localhost/", debug_mode: bool = False, debug_dir: str = "prompts", model_name: str = "gemini-2.5-flash"):
         """
         Initialize the wrapper generator with Gemini API key and RabbitMQ connection
         
@@ -136,7 +136,7 @@ class WrapperGenerator:
             rabbitmq_url: RabbitMQ connection URL
             debug_mode: Enable debug mode for saving prompts/responses
             debug_dir: Directory to save debug files
-            model_name: Gemini model name to use (default: gemini-2.5-flash-preview-05-20)
+            model_name: Gemini model name to use (default: gemini-2.5-flash)
         """
         self.gemini_api_key = gemini_api_key
         self.rabbitmq_url = rabbitmq_url
@@ -469,7 +469,7 @@ def create_wrapper_from_config(
     gemini_api_key: str,
     mode: str = "once",
     auth_config: Optional[Dict[str, Any]] = None,
-    model_name: str = "gemini-2.5-flash-preview-05-20"
+    model_name: str = "gemini-2.5-flash"
 ) -> None:
     """
     Utility function to create a wrapper from configuration parameters
@@ -491,7 +491,7 @@ def create_wrapper_from_config(
         gemini_api_key: API key for Gemini
         mode: Execution mode ("once" or "continuous")
         auth_config: Authentication configuration for APIs (optional)
-        model_name: Gemini model name to use (default: gemini-2.5-flash-preview-05-20)
+        model_name: Gemini model name to use (default: gemini-2.5-flash)
     """
     async def _create_wrapper():
         generator = WrapperGenerator(gemini_api_key, model_name=model_name)
