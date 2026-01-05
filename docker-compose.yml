@@ -6,6 +6,8 @@ services:
     environment:
       - MONGO_URI=mongodb://resource-mongo:27017/resources
       - ORIGINS=${ORIGINS:-localhost}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-1.5-flash}
     depends_on:
       - resource-mongo
     networks:

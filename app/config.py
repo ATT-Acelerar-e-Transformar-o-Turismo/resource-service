@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     
     # Wrapper Generation
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
+    GEMINI_MODEL_NAME: str = Field(default="gemini-1.5-flash", env="GEMINI_MODEL_NAME")
     DATA_RABBITMQ_URL: str = Field(
         default="amqp://user:password@data-mq:5672/", env="DATA_RABBITMQ_URL"
     )

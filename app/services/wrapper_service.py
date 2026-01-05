@@ -456,7 +456,8 @@ def create_wrapper_service() -> WrapperService:
         gemini_api_key=settings.GEMINI_API_KEY,
         rabbitmq_url=settings.DATA_RABBITMQ_URL,
         debug_mode=True,
-        debug_dir="/app/prompts"
+        debug_dir="/app/prompts",
+        model_name=settings.GEMINI_MODEL_NAME
     )
 
     return WrapperService(
