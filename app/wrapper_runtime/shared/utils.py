@@ -14,29 +14,22 @@ def mask_credentials(url: str) -> str:
     """
     if not url or '://' not in url:
         return url
-    
+
     try:
-        # Split protocol and rest
         protocol, rest = url.split('://', 1)
-        
-        # Check if there are credentials (contains @)
+
         if '@' not in rest:
-            return url  # No credentials to mask
-        
-        # Split credentials and host part
+            return url
+
         credentials_part, host_part = rest.rsplit('@', 1)
-        
-        # Mask credentials
+
         if ':' in credentials_part:
-            # user:password format
             masked_credentials = '***:***'
         else:
-            # just username format
             masked_credentials = '***'
-        
+
         return f"{protocol}://{masked_credentials}@{host_part}"
-    except Exception:
-        # If parsing fails, mask the entire URL for safety
+    except (ValueError, AttributeError, IndexError):
         return "***MASKED_URL***"
 
 class RateLimitHandler:
@@ -275,8 +268,8 @@ class HistoricalDataFetcher:
                 await send_to_queue_func(batch_data)
                 total_points_sent += len(batch_data)
                 print(f"Wrapper {self.wrapper_id}: Sent {len(batch_data)} historical points to queue")
-                
-            except Exception as e:
+
+            except (ValueError, KeyError, TypeError, ConnectionError, TimeoutError) as e:
                 error_message = str(e).lower()
                 consecutive_errors += 1
                 
@@ -369,8 +362,8 @@ class MessageQueueSender:
                         print(f"Wrapper {self.wrapper_id}: Sent segment {segment_num + 1}/{total_segments} with {len(chunk)} data points")
                     
                     print(f"Wrapper {self.wrapper_id}: Completed sending {total_points} data points in {total_segments} messages")
-                
-        except Exception as e:
+
+        except (ConnectionError, TimeoutError, OSError) as e:
             print(f"Error sending data to queue: {str(e)}")
             raise
 
@@ -437,7 +430,7 @@ class ContinuousExecutor:
                 print(f"Wrapper {self.wrapper_id}: Fetching historical data before starting continuous mode...")
                 await fetch_historical_func()
                 print(f"Wrapper {self.wrapper_id}: Historical data fetch completed")
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, ConnectionError, TimeoutError, OSError) as e:
                 print(f"Wrapper {self.wrapper_id}: Error fetching historical data: {str(e)}")
                 print("Proceeding with continuous mode for current data only...")
         
@@ -452,7 +445,7 @@ class ContinuousExecutor:
             except KeyboardInterrupt:
                 print(f"Wrapper {self.wrapper_id}: Stopping execution")
                 break
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, ConnectionError, TimeoutError, OSError) as e:
                 print(f"Wrapper {self.wrapper_id}: Error in continuous execution: {str(e)}")
                 print(f"Waiting {self.interval_seconds}s before retry...")
                 await asyncio.sleep(self.interval_seconds)

@@ -76,7 +76,7 @@ class ProcessWrapperRunner(WrapperRunner):
                     execution_time=datetime.utcnow()
                 )
 
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             logger.error(f"Error executing wrapper {wrapper.wrapper_id} in process: {e}")
 
             return WrapperExecutionResult(

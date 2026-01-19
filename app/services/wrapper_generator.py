@@ -79,26 +79,26 @@ class DebugLogger:
         
         try:
             os.makedirs(prompt_dir, exist_ok=True)
-            
+
             # Save prompt
             prompt_file = os.path.join(prompt_dir, "prompt.txt")
             with open(prompt_file, 'w', encoding='utf-8') as f:
                 f.write(prompt)
-            
+
             # Save response
             response_file = os.path.join(prompt_dir, "response.txt")
             with open(response_file, 'w', encoding='utf-8') as f:
                 f.write(response)
-            
+
             # Save metadata if provided
             if metadata:
                 metadata_file = os.path.join(prompt_dir, "metadata.json")
                 with open(metadata_file, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
-            
+
             print(f"Debug: Wrapper {wrapper_id} prompt saved to {prompt_dir}/")
-            
-        except Exception as e:
+
+        except (OSError, IOError, json.JSONDecodeError) as e:
             print(f"Error saving debug prompt for wrapper {wrapper_id}: {e}")
     
     def log_error(self, error: str, context: Dict[str, Any] = None):
@@ -112,7 +112,7 @@ class DebugLogger:
         
         try:
             os.makedirs(error_dir, exist_ok=True)
-            
+
             # Save error
             error_file = os.path.join(error_dir, "error.txt")
             with open(error_file, 'w', encoding='utf-8') as f:
@@ -120,10 +120,10 @@ class DebugLogger:
                 f.write(f"Timestamp: {datetime.now().isoformat()}\n")
                 if context:
                     f.write(f"\nContext:\n{json.dumps(context, indent=2, ensure_ascii=False, default=str)}")
-            
+
             print(f"Debug: Wrapper {wrapper_id} error saved to {error_dir}/")
-            
-        except Exception as e:
+
+        except (OSError, IOError, json.JSONDecodeError) as e:
             print(f"Error saving debug error for wrapper {wrapper_id}: {e}")
 
 class WrapperGenerator:
@@ -156,9 +156,9 @@ class WrapperGenerator:
                     if i >= max_lines:
                         break
                     sample_lines.append(line.strip())
-            
+
             return '\n'.join(sample_lines)
-        except Exception as e:
+        except (FileNotFoundError, IOError, UnicodeDecodeError) as e:
             return f"Error reading CSV file: {str(e)}"
 
     def get_xlsx_sample(self, file_path: str, max_lines_per_sheet: int = 15) -> str:
@@ -185,12 +185,12 @@ class WrapperGenerator:
                     sample_data.append(f"Shape: {df.shape}")
                     sample_data.append("Sample data:")
                     sample_data.append(df.to_string())
-                except Exception as sheet_error:
+                except (pd.errors.ParserError, ValueError) as sheet_error:
                     sample_data.append(f"Error reading sheet {sheet_name}: {sheet_error}")
                 sample_data.append("")
-            
+
             return '\n'.join(sample_data)
-        except Exception as e:
+        except (FileNotFoundError, IOError, pd.errors.ParserError, ValueError) as e:
             return f"Error reading XLSX file: {str(e)}"
 
     def get_api_sample(self, endpoint: str, auth_config: Dict[str, Any], max_chars: int = 2500) -> str:
@@ -235,11 +235,11 @@ class WrapperGenerator:
                 if len(content) > max_chars:
                     content = content[:max_chars] + "\n... (truncated)"
                 return f"API Response (Status: {response.status_code}):\n{content}"
-                
+
         except requests.exceptions.RequestException as e:
             return f"Error calling API: {str(e)}"
-        except Exception as e:
-            return f"Unexpected error: {str(e)}"
+        except (json.JSONDecodeError, ValueError) as e:
+            return f"Error parsing API response: {str(e)}"
 
     async def generate_wrapper(self,
                              indicator_metadata: IndicatorMetadata,
@@ -341,19 +341,19 @@ class WrapperGenerator:
                     print(f"{'='*80}\n")
                 
                 self.debug_logger.log_error(error_msg, debug_metadata)
-                raise Exception(error_msg)
-            
+                raise ValueError(error_msg)
+
             return generated_code
-            
-        except Exception as e:
+
+        except (ValueError, AttributeError, TypeError) as e:
             error_msg = f"Error generating wrapper with Gemini: {str(e)}"
             print(error_msg)
-            
+
             # Log error in debug mode
             debug_metadata["error"] = str(e)
             self.debug_logger.log_error(error_msg, debug_metadata)
-            
-            raise Exception(f"Failed to generate customized wrapper: {error_msg}")
+
+            raise ValueError(f"Failed to generate customized wrapper: {error_msg}")
 
     def _clean_code_response(self, code: str) -> str:
         """
@@ -420,8 +420,8 @@ class WrapperGenerator:
                     print(f"Continuous wrapper {wrapper_id} stopped after timeout (normal behavior)")
                 else:
                     print(f"Warning: 'once' mode wrapper {wrapper_id} timed out (may indicate an issue)")
-                
-        except Exception as e:
+
+        except (ImportError, AttributeError, FileNotFoundError) as e:
             print(f"Error executing wrapper: {str(e)}")
             raise
 

@@ -61,6 +61,6 @@ async def process_collected_data(message: aio_pika.abc.AbstractIncomingMessage):
         except (ValueError, TypeError) as e:
             logger.error(f"Data validation error: {e}")
             await message.nack(requeue=False)
-        except Exception as e:
-            logger.error(f"Unexpected error processing message: {e}")
+        except (ConnectionError, TimeoutError, OSError) as e:
+            logger.error(f"Connection error processing message: {e}", exc_info=True)
             await message.nack(requeue=True)

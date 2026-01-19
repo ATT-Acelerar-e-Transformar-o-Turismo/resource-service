@@ -14,13 +14,11 @@ logger = logging.getLogger(__name__)
 
 class FileService:
     def __init__(self):
-        # Create uploads directory if it doesn't exist
         self.upload_dir = os.path.join(os.getcwd(), "uploads")
         os.makedirs(self.upload_dir, exist_ok=True)
         
     def _get_file_path(self, file_id: str, filename: str) -> str:
-        """Generate secure file path for storage"""
-        # Use file_id as directory to avoid conflicts
+        """Generate secure file path for storage using file_id as subdirectory"""
         file_dir = os.path.join(self.upload_dir, file_id)
         os.makedirs(file_dir, exist_ok=True)
         return os.path.join(file_dir, filename)
@@ -65,12 +63,10 @@ class FileService:
                 )
             
             errors = []
-            
-            # Check if file has data
+
             if df.empty:
                 errors.append("File is empty")
-            
-            # Check if file has at least 2 columns (x, y for time series)
+
             if len(df.columns) < 2:
                 errors.append("File must have at least 2 columns for time series data")
             
@@ -85,7 +81,7 @@ class FileService:
                 row_count=len(full_df) if not df.empty else 0
             )
             
-        except Exception as e:
+        except (pd.errors.ParserError, ValueError, UnicodeDecodeError, FileNotFoundError) as e:
             logger.error(f"Error validating file content: {e}")
             return FileValidationResult(
                 is_valid=False,
@@ -104,9 +100,8 @@ class FileService:
             # Read file content
             content = await file.read()
             file_size = len(content)
-            
-            # Check file size (max 50MB)
-            max_size = 50 * 1024 * 1024  # 50MB
+
+            max_size = 50 * 1024 * 1024
             if file_size > max_size:
                 raise HTTPException(
                     status_code=400,
@@ -118,10 +113,8 @@ class FileService:
             with open(file_path, 'wb') as f:
                 f.write(content)
             
-            # Validate file content
             validation_result = self._validate_file_content(file_path)
-            
-            # Create uploaded file record
+
             uploaded_file = UploadedFile(
                 file_id=file_id,
                 filename=file.filename,
@@ -142,7 +135,7 @@ class FileService:
             
         except HTTPException:
             raise
-        except Exception as e:
+        except (IOError, OSError, PermissionError, ValueError) as e:
             logger.error(f"Error uploading file: {e}")
             raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
     
@@ -153,35 +146,31 @@ class FileService:
             if not file_doc:
                 return None
             return UploadedFile(**file_doc)
-        except Exception as e:
-            logger.error(f"Error retrieving uploaded file {file_id}: {e}")
-            raise HTTPException(status_code=500, detail="Error retrieving file")
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"Database error retrieving uploaded file {file_id}: {e}")
+            raise HTTPException(status_code=503, detail="Database unavailable")
     
     async def delete_uploaded_file(self, file_id: str) -> bool:
         """Delete uploaded file from disk and database"""
         try:
-            # Get file info
             uploaded_file = await self.get_uploaded_file(file_id)
             if not uploaded_file:
                 return False
-            
-            # Delete from disk
+
             if os.path.exists(uploaded_file.file_path):
                 os.remove(uploaded_file.file_path)
-                # Also try to remove the directory if empty
                 file_dir = os.path.dirname(uploaded_file.file_path)
                 try:
                     os.rmdir(file_dir)
                 except OSError:
-                    pass  # Directory not empty
-            
-            # Delete from database
+                    pass
+
             result = await db.uploaded_files.delete_one({"file_id": file_id})
             
             logger.info(f"File deleted: {file_id}")
             return result.deleted_count > 0
             
-        except Exception as e:
+        except (OSError, PermissionError, ConnectionError, FileNotFoundError) as e:
             logger.error(f"Error deleting file {file_id}: {e}")
             return False
 

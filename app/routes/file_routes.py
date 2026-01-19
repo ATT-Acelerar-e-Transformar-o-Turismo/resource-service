@@ -37,9 +37,9 @@ async def upload_file(file: UploadFile = File(...)):
         
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Unexpected error in file upload: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    except (IOError, OSError, ValueError, PermissionError) as e:
+        logger.error(f"File upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
 
 @router.get("/{file_id}")
 async def get_file_info(file_id: str):
@@ -82,6 +82,6 @@ async def list_files():
             "files": files,
             "count": len(files)
         }
-    except Exception as e:
-        logger.error(f"Error listing files: {e}")
-        raise HTTPException(status_code=500, detail="Error listing files")
+    except (ConnectionError, TimeoutError) as e:
+        logger.error(f"Database error listing files: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")

@@ -50,11 +50,10 @@ async def lifespan(app: FastAPI):
     finally:
         # Graceful shutdown
         try:
-            # Stop wrapper process monitoring
             await wrapper_process_manager.stop_monitoring()
             logger.info("Stopped wrapper process monitoring")
-        except Exception as e:
-            logger.error(f"Error stopping wrapper monitoring: {e}")
+        except (asyncio.CancelledError, RuntimeError) as e:
+            logger.error(f"Error stopping wrapper monitoring: {e}", exc_info=True)
 
         # Close RabbitMQ connection
         if rabbitmq_client:

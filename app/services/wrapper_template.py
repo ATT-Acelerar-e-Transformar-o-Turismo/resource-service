@@ -88,8 +88,8 @@ class ATTWrapper:
                 }})
                 
             return data_points
-            
-        except Exception as e:
+
+        except (ValueError, KeyError, TypeError, ConnectionError, TimeoutError, OSError) as e:
             print(f"Error fetching external data: {{str(e)}}")
             raise
     

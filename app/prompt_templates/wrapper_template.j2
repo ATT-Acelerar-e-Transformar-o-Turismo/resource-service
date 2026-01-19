@@ -94,7 +94,7 @@ class ATTWrapper:
             print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Successfully fetched {len(data_points)} data points")
             return data_points
 
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, ConnectionError, TimeoutError, OSError) as e:
             print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Error fetching external data: {str(e)}")
             raise
     

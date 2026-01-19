@@ -29,9 +29,12 @@ async def generate_wrapper(request: WrapperGenerationRequest) -> GeneratedWrappe
         return wrapper
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Wrapper generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Wrapper generation failed: {str(e)}")
+    except (ValueError, KeyError) as e:
+        logger.error(f"Invalid wrapper generation request: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
+    except (ConnectionError, TimeoutError) as e:
+        logger.error(f"External service error during wrapper generation: {e}")
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
 
 @router.post("/{wrapper_id}/execute", response_model=WrapperExecutionResult)
 async def execute_wrapper(wrapper_id: str, background_tasks: BackgroundTasks) -> WrapperExecutionResult:
@@ -39,9 +42,14 @@ async def execute_wrapper(wrapper_id: str, background_tasks: BackgroundTasks) ->
     try:
         result = await wrapper_service.execute_wrapper(wrapper_id)
         return result
-    except Exception as e:
-        logger.error(f"Wrapper execution failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Execution failed: {str(e)}")
+    except HTTPException:
+        raise
+    except (ValueError, FileNotFoundError) as e:
+        logger.error(f"Wrapper execution error for {wrapper_id}: {e}")
+        raise HTTPException(status_code=400, detail=f"Execution error: {str(e)}")
+    except (ConnectionError, TimeoutError) as e:
+        logger.error(f"Connection error during wrapper execution for {wrapper_id}: {e}")
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
 
 @router.get("/{wrapper_id}", response_model=GeneratedWrapper)
 async def get_wrapper(wrapper_id: str) -> GeneratedWrapper:
@@ -64,8 +72,8 @@ async def get_wrapper(wrapper_id: str) -> GeneratedWrapper:
                 # Refresh the wrapper data with updated status
                 wrapper = await wrapper_service.get_wrapper(wrapper_id)
                 logger.info(f"Updated wrapper {wrapper_id} status from 'executing' to 'error' - process not found")
-        except Exception as e:
-            logger.warning(f"Failed to validate status for wrapper {wrapper_id}: {e}")
+        except (ConnectionError, TimeoutError) as e:
+            logger.warning(f"Connection error validating status for wrapper {wrapper_id}: {e}")
 
     return wrapper
 
@@ -74,9 +82,9 @@ async def list_wrappers(skip: int = 0, limit: int = 10) -> List[GeneratedWrapper
     """List all generated wrappers"""
     try:
         return await wrapper_service.list_wrappers(skip, limit)
-    except Exception as e:
-        logger.error(f"Failed to list wrappers: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve wrappers")
+    except (ConnectionError, TimeoutError) as e:
+        logger.error(f"Database connection error listing wrappers: {e}")
+        raise HTTPException(status_code=503, detail="Database service unavailable")
 
 @router.post("/{wrapper_id}/stop")
 async def stop_wrapper(wrapper_id: str) -> dict:
@@ -88,9 +96,11 @@ async def stop_wrapper(wrapper_id: str) -> dict:
             "success": success,
             "message": "Wrapper stopped successfully" if success else "Failed to stop wrapper"
         }
-    except Exception as e:
-        logger.error(f"Failed to stop wrapper {wrapper_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to stop wrapper: {str(e)}")
+    except HTTPException:
+        raise
+    except (ValueError, ProcessLookupError) as e:
+        logger.error(f"Error stopping wrapper {wrapper_id}: {e}")
+        raise HTTPException(status_code=400, detail=f"Stop error: {str(e)}")
 
 @router.get("/{wrapper_id}/health")
 async def get_wrapper_health(wrapper_id: str) -> dict:
@@ -104,9 +114,11 @@ async def get_wrapper_health(wrapper_id: str) -> dict:
             "health_status": health_status,
             "is_actively_executing": is_executing
         }
-    except Exception as e:
-        logger.error(f"Failed to get health for wrapper {wrapper_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get health status: {str(e)}")
+    except HTTPException:
+        raise
+    except (ConnectionError, TimeoutError) as e:
+        logger.error(f"Connection error getting health for wrapper {wrapper_id}: {e}")
+        raise HTTPException(status_code=503, detail="Service unavailable")
 
 @router.get("/{wrapper_id}/logs")
 async def get_wrapper_logs(wrapper_id: str, limit: int = 200) -> dict:
@@ -118,9 +130,11 @@ async def get_wrapper_logs(wrapper_id: str, limit: int = 200) -> dict:
             "logs": logs,
             "total_lines": len(logs)
         }
-    except Exception as e:
-        logger.error(f"Failed to get logs for wrapper {wrapper_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve logs: {str(e)}")
+    except HTTPException:
+        raise
+    except (IOError, FileNotFoundError, PermissionError) as e:
+        logger.error(f"File system error reading logs for wrapper {wrapper_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read log files")
 
 @router.get("/{wrapper_id}/monitoring")
 async def get_wrapper_monitoring_details(wrapper_id: str) -> dict:
@@ -134,6 +148,8 @@ async def get_wrapper_monitoring_details(wrapper_id: str) -> dict:
             "health_status": health_status,
             "monitoring_details": monitoring_details
         }
-    except Exception as e:
-        logger.error(f"Failed to get monitoring details for wrapper {wrapper_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get monitoring details: {str(e)}")
+    except HTTPException:
+        raise
+    except (ConnectionError, TimeoutError) as e:
+        logger.error(f"Connection error getting monitoring details for wrapper {wrapper_id}: {e}")
+        raise HTTPException(status_code=503, detail="Service unavailable")

@@ -73,9 +73,14 @@ class WrapperService:
             await rabbitmq_client.publish(self.queue_name, json.dumps({"wrapper_id": wrapper_id}))
 
             return wrapper
-            
-        except Exception as e:
-            logger.error(f"Failed to queue wrapper creation: {e}")
+
+        except (OperationFailure, ConnectionError) as e:
+            logger.error(f"Database/Connection error queueing wrapper creation: {e}")
+            if 'wrapper_id' in locals():
+                await self._update_wrapper_status(wrapper_id, WrapperStatus.ERROR, error_message=str(e))
+            raise
+        except (ValueError, KeyError) as e:
+            logger.error(f"Invalid wrapper configuration: {e}")
             if 'wrapper_id' in locals():
                 await self._update_wrapper_status(wrapper_id, WrapperStatus.ERROR, error_message=str(e))
             raise
@@ -83,7 +88,6 @@ class WrapperService:
     async def execute_wrapper(self, wrapper_id: str) -> WrapperExecutionResult:
         """Execute a generated wrapper using the wrapper runner"""
         try:
-            # Get wrapper from database
             wrapper_doc = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})
             if not wrapper_doc:
                 return WrapperExecutionResult(
@@ -93,13 +97,11 @@ class WrapperService:
                     data_points_sent=None,
                     execution_time=datetime.utcnow().isoformat()
                 )
-            
+
             wrapper = GeneratedWrapper(**wrapper_doc)
-            
-            # Execute wrapper using the configured runner
+
             result = await self._runner.execute_wrapper(wrapper)
-            
-            # Update database based on execution result
+
             if result.success:
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id},
@@ -118,11 +120,10 @@ class WrapperService:
                 )
             
             return result
-                
-        except Exception as e:
-            logger.error(f"Failed to execute wrapper {wrapper_id}: {e}")
-            
-            # Update error status
+
+        except (OperationFailure, ConnectionError) as e:
+            logger.error(f"Database/Connection error executing wrapper {wrapper_id}: {e}")
+
             await db.generated_wrappers.update_one(
                 {"wrapper_id": wrapper_id},
                 {
@@ -130,7 +131,25 @@ class WrapperService:
                     "$push": {"execution_log": f"Error at {datetime.utcnow()}: {str(e)}"}
                 }
             )
-            
+
+            return WrapperExecutionResult(
+                wrapper_id=wrapper_id,
+                success=False,
+                message=f"Execution failed: {str(e)}",
+                data_points_sent=None,
+                execution_time=datetime.utcnow().isoformat()
+            )
+        except (ValueError, FileNotFoundError, subprocess.SubprocessError) as e:
+            logger.error(f"Execution error for wrapper {wrapper_id}: {e}")
+
+            await db.generated_wrappers.update_one(
+                {"wrapper_id": wrapper_id},
+                {
+                    "$set": {"status": WrapperStatus.ERROR.value},
+                    "$push": {"execution_log": f"Error at {datetime.utcnow()}: {str(e)}"}
+                }
+            )
+
             return WrapperExecutionResult(
                 wrapper_id=wrapper_id,
                 success=False,
@@ -162,32 +181,27 @@ class WrapperService:
     async def process_wrapper_creation(self, message_data: dict):
         """Process wrapper creation task - this runs in the consumer"""
         wrapper_id = message_data["wrapper_id"]
-        
+
         try:
             logger.info(f"Processing wrapper creation {wrapper_id}")
-            
-            # Get the wrapper record
+
             wrapper_doc = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})
             if not wrapper_doc:
                 logger.error(f"Wrapper {wrapper_id} not found in database")
-                # Check if wrapper exists with different query
                 all_wrappers = await db.generated_wrappers.find({}).to_list(None)
                 logger.error(f"Total wrappers in database: {len(all_wrappers)}")
                 recent_wrappers = [w.get("wrapper_id") for w in all_wrappers[-5:]]
                 logger.error(f"Recent wrapper IDs: {recent_wrappers}")
                 raise Exception(f"Wrapper with ID '{wrapper_id}' does not exist")
-            
+
             wrapper = GeneratedWrapper(**wrapper_doc)
-            
-            # Step 1: Update status to generating
+
             await self._update_wrapper_status(wrapper_id, WrapperStatus.GENERATING)
-            
-            # Step 2: Generate wrapper code
+
             generated_code = await self.generator.generate_wrapper(
                 wrapper.metadata, wrapper.source_config, wrapper.source_type.value, wrapper_id
             )
-            
-            # Update wrapper with generated code
+
             await db.generated_wrappers.update_one(
                 {"wrapper_id": wrapper_id},
                 {
@@ -199,18 +213,14 @@ class WrapperService:
             )
             logger.info(f"Generated code for wrapper {wrapper_id}")
 
-            # Save generated code to file for process execution
             wrapper_file_path = self.generator.save_wrapper(generated_code, wrapper_id)
             logger.info(f"Saved wrapper code to file: {wrapper_file_path}")
 
-            # Step 3: Resource already created in generate_and_store_wrapper
             resource_id = wrapper.resource_id
             logger.info(f"Using existing resource {resource_id} for wrapper {wrapper_id}")
 
-            # Step 4: Execute wrapper
             await self._update_wrapper_status(wrapper_id, WrapperStatus.EXECUTING)
-            
-            # Create a GeneratedWrapper object for execution
+
             updated_wrapper = GeneratedWrapper(
                 wrapper_id=wrapper_id,
                 resource_id=resource_id,
@@ -221,11 +231,9 @@ class WrapperService:
                 status=WrapperStatus.EXECUTING
             )
 
-            # Execute wrapper using the configured runner
             execution_result = await self._runner.execute_wrapper(updated_wrapper)
             logger.info(f"Executed wrapper {wrapper_id} with {type(self._runner).__name__}")
 
-            # Update database based on execution result
             if execution_result.success:
                 # For API wrappers, they run continuously, so mark as EXECUTING
                 # For file wrappers, they complete immediately, so mark as COMPLETED
@@ -260,9 +268,13 @@ class WrapperService:
                 )
             
             logger.info(f"Completed wrapper creation {wrapper_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to process wrapper creation {wrapper_id}: {e}")
+
+        except (OperationFailure, ConnectionError, TimeoutError) as e:
+            logger.error(f"Database/Connection error processing wrapper {wrapper_id}: {e}")
+            await self._update_wrapper_status(wrapper_id, WrapperStatus.ERROR, error_message=str(e))
+            raise
+        except (ValueError, KeyError, FileNotFoundError) as e:
+            logger.error(f"Configuration/File error processing wrapper {wrapper_id}: {e}")
             await self._update_wrapper_status(wrapper_id, WrapperStatus.ERROR, error_message=str(e))
             raise
     
@@ -286,9 +298,9 @@ class WrapperService:
             )
             
             logger.info(f"Updated wrapper {wrapper_id} status to {status.value}")
-            
-        except Exception as e:
-            logger.error(f"Failed to update wrapper status: {e}")
+
+        except (OperationFailure, ConnectionError) as e:
+            logger.error(f"Database error updating wrapper status: {e}")
             raise
 
     async def stop_wrapper_execution(self, wrapper_id: str) -> bool:
@@ -316,8 +328,11 @@ class WrapperService:
 
             return success
 
-        except Exception as e:
-            logger.error(f"Error stopping wrapper {wrapper_id}: {e}")
+        except (ProcessLookupError, PermissionError) as e:
+            logger.error(f"Process error stopping wrapper {wrapper_id}: {e}")
+            return False
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"Connection error stopping wrapper {wrapper_id}: {e}")
             return False
 
     async def get_wrapper_health_status(self, wrapper_id: str) -> str:
@@ -337,8 +352,11 @@ class WrapperService:
             monitor = self._runner.get_monitor()
             return await monitor.get_health_status(wrapper_id)
 
-        except Exception as e:
-            logger.error(f"Error getting health status for wrapper {wrapper_id}: {e}")
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"Connection error getting health status for wrapper {wrapper_id}: {e}")
+            return "UNKNOWN"
+        except (ValueError, KeyError) as e:
+            logger.error(f"Invalid data getting health status for wrapper {wrapper_id}: {e}")
             return "UNKNOWN"
 
     async def get_wrapper_monitoring_details(self, wrapper_id: str) -> dict:
@@ -350,9 +368,12 @@ class WrapperService:
             monitor = self._runner.get_monitor()
             return await monitor.get_monitoring_details(wrapper_id)
 
-        except Exception as e:
-            logger.error(f"Error getting monitoring details for wrapper {wrapper_id}: {e}")
-            return {"error": str(e)}
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"Connection error getting monitoring details for wrapper {wrapper_id}: {e}")
+            return {"error": "Service unavailable"}
+        except (ValueError, KeyError) as e:
+            logger.error(f"Invalid data getting monitoring details for wrapper {wrapper_id}: {e}")
+            return {"error": "Invalid data"}
 
     async def get_wrapper_logs(self, wrapper_id: str, limit: int = 100) -> list:
         """Get wrapper logs from log files (universal method)
@@ -372,9 +393,12 @@ class WrapperService:
             monitor = self._runner.get_monitor()
             return await monitor.get_logs(wrapper_id, limit)
 
-        except Exception as e:
-            logger.error(f"Error getting logs for wrapper {wrapper_id}: {e}")
+        except (IOError, FileNotFoundError, PermissionError) as e:
+            logger.error(f"File system error getting logs for wrapper {wrapper_id}: {e}")
             return [f"Error reading logs: {str(e)}"]
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"Connection error getting logs for wrapper {wrapper_id}: {e}")
+            return ["Error: Service unavailable"]
 
     async def is_wrapper_actively_executing(self, wrapper_id: str) -> bool:
         """Check if wrapper is actively executing (universal method)
@@ -393,7 +417,7 @@ class WrapperService:
             monitor = self._runner.get_monitor()
             return await monitor.is_actively_executing(wrapper_id)
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, ProcessLookupError) as e:
             logger.error(f"Error checking if wrapper {wrapper_id} is executing: {e}")
             return False
 
@@ -414,11 +438,9 @@ class WrapperService:
                 try:
                     wrapper = GeneratedWrapper(**wrapper_doc)
 
-                    # Only restart API wrappers (continuous)
                     if wrapper.source_type.value != "API":
                         continue
 
-                    # Check if wrapper file exists
                     wrapper_file_path = f"/app/generated_wrappers/{wrapper.wrapper_id}.py"
                     if not os.path.exists(wrapper_file_path):
                         await self._update_wrapper_status(
@@ -430,28 +452,26 @@ class WrapperService:
 
                     logger.info(f"Restarting wrapper {wrapper.wrapper_id}")
 
-                    # Execute with skip-historical flag
                     execution_result = await self._runner.execute_wrapper(wrapper, skip_historical=True)
 
                     if execution_result.success:
                         restarted_count += 1
 
-                except Exception as e:
-                    logger.error(f"Error restarting wrapper {wrapper_doc.get('wrapper_id', 'unknown')}: {e}")
+                except (FileNotFoundError, subprocess.SubprocessError) as e:
+                    logger.error(f"File/Process error restarting wrapper {wrapper_doc.get('wrapper_id', 'unknown')}: {e}")
+                except (ValueError, KeyError) as e:
+                    logger.error(f"Configuration error restarting wrapper {wrapper_doc.get('wrapper_id', 'unknown')}: {e}")
 
             logger.info(f"Restarted {restarted_count} wrappers")
 
-        except Exception as e:
-            logger.error(f"Error during restart of executing wrappers: {e}")
+        except (OperationFailure, ConnectionError) as e:
+            logger.error(f"Database/Connection error during restart of executing wrappers: {e}")
 
 
 def create_wrapper_service() -> WrapperService:
     """Factory function to create WrapperService with proper dependencies."""
-
-    # Create single runner (ProcessWrapperRunner handles all source types)
     runner = ProcessWrapperRunner(wrapper_process_manager)
 
-    # Create generator
     generator = WrapperGenerator(
         gemini_api_key=settings.GEMINI_API_KEY,
         rabbitmq_url=settings.DATA_RABBITMQ_URL,
@@ -478,6 +498,9 @@ async def process_wrapper_creation_message(message: aio_pika.abc.AbstractIncomin
             message_data = json.loads(message.body.decode())
             await wrapper_service.process_wrapper_creation(message_data)
             logger.info(f"Successfully processed wrapper creation task {message_data['wrapper_id']}")
-        except Exception as e:
-            logger.error(f"Error processing wrapper creation message: {e}")
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Invalid message format in wrapper creation queue: {e}")
+            raise
+        except (OperationFailure, ConnectionError, TimeoutError) as e:
+            logger.error(f"Database/Connection error processing wrapper creation: {e}")
             raise

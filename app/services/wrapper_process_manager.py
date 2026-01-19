@@ -53,8 +53,8 @@ class WrapperProcessManager:
                 await self._check_process_health()
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"Error in process monitoring: {e}")
+            except (OSError, OperationFailure) as e:
+                logger.error(f"Error in process monitoring: {e}", exc_info=True)
 
     async def _append_exit_info_to_logs(self, wrapper_id: str, exit_code: int):
         """Append process exit information to log files without deleting existing logs"""
@@ -82,8 +82,8 @@ class WrapperProcessManager:
 
             logger.info(f"Appended exit information (code {exit_code}) to log file for wrapper {wrapper_id}")
 
-        except Exception as e:
-            logger.error(f"Error appending exit info to logs for wrapper {wrapper_id}: {e}")
+        except (IOError, OSError) as e:
+            logger.error(f"Error appending exit info to logs for wrapper {wrapper_id}: {e}", exc_info=True)
 
     async def _check_process_health(self):
         """Check health of all running processes"""
@@ -113,9 +113,9 @@ class WrapperProcessManager:
                 else:
                     # Process is running, update health check
                     wrapper_process.last_health_check = datetime.utcnow()
-                    
-            except Exception as e:
-                logger.error(f"Health check failed for wrapper {wrapper_id}: {e}")
+
+            except (OSError, OperationFailure) as e:
+                logger.error(f"Health check failed for wrapper {wrapper_id}: {e}", exc_info=True)
         
         # Clean up dead processes
         for wrapper_id in dead_processes:
@@ -177,9 +177,9 @@ class WrapperProcessManager:
             
             logger.info(f"Started wrapper {wrapper_id} in process {process.pid}")
             return True
-            
-        except Exception as e:
-            logger.error(f"Failed to start wrapper process {wrapper_id}: {e}")
+
+        except (OSError, IOError, ValueError, OperationFailure) as e:
+            logger.error(f"Failed to start wrapper process {wrapper_id}: {e}", exc_info=True)
             return False
     
     async def _cleanup_process(self, wrapper_id: str):
@@ -211,9 +211,8 @@ class WrapperProcessManager:
 
             logger.info(f"Successfully cleaned up process resources for wrapper {wrapper_id}")
 
-        except Exception as e:
-            logger.error(f"Error during process cleanup for wrapper {wrapper_id}: {e}")
-            # Still remove from tracking even if cleanup failed
+        except (ProcessLookupError, OSError, subprocess.SubprocessError) as e:
+            logger.error(f"Error during process cleanup for wrapper {wrapper_id}: {e}", exc_info=True)
             if wrapper_id in self.running_processes:
                 del self.running_processes[wrapper_id]
 
