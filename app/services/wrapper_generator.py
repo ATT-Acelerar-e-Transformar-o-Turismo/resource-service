@@ -1,7 +1,10 @@
 import asyncio
+import ast
 import aio_pika
 import json
+import re
 from google import genai
+from google.genai import types
 from datetime import datetime, timedelta
 import os
 import importlib.util
@@ -11,24 +14,28 @@ from typing import Dict, List, Any, Optional
 import requests
 import random
 import pandas as pd
-from .wrapper_template import get_wrapper_template
 from .prompt_manager import PromptManager
+from .wrapper_generation_tools import create_tool_runtime
+
 
 class IndicatorMetadata:
     """
     Class to hold indicator metadata
     """
-    def __init__(self, 
-                 name: str,
-                 domain: str,
-                 subdomain: str,
-                 description: str,
-                 unit: str,
-                 source: str,
-                 scale: str,
-                 governance_indicator: bool,
-                 carrying_capacity: Optional[float],
-                 periodicity: str):
+
+    def __init__(
+        self,
+        name: str,
+        domain: str,
+        subdomain: str,
+        description: str,
+        unit: str,
+        source: str,
+        scale: str,
+        governance_indicator: bool,
+        carrying_capacity: Optional[float],
+        periodicity: str,
+    ):
         self.name = name
         self.domain = domain
         self.subdomain = subdomain
@@ -40,97 +47,148 @@ class IndicatorMetadata:
         self.carrying_capacity = carrying_capacity
         self.periodicity = periodicity
 
+
 class DataSourceConfig:
     """
     Configuration for different data source types
     """
-    def __init__(self, 
-                 source_type: str,  # "API", "CSV", "XLSX"
-                 location: str,     # endpoint URL or file path
-                 auth_config: Optional[Dict[str, Any]] = None):  # authentication config for APIs
+
+    def __init__(
+        self,
+        source_type: str,  # "API", "CSV", "XLSX"
+        location: str,  # endpoint URL or file path
+        auth_config: Optional[Dict[str, Any]] = None,
+    ):  # authentication config for APIs
         self.source_type = source_type
         self.location = location
         self.auth_config = auth_config or {}
 
+
 class DebugLogger:
     """Logger for debug mode that saves prompts and responses"""
-    
+
     def __init__(self, debug_mode: bool = False, debug_dir: str = "prompts"):
         self.debug_mode = debug_mode
         self.debug_dir = debug_dir
-        
+
         if self.debug_mode:
             self._setup_debug_directory()
-    
+
     def _setup_debug_directory(self):
         """Setup debug directory"""
         if not os.path.exists(self.debug_dir):
             os.makedirs(self.debug_dir)
             print(f"Debug mode activated: {self.debug_dir}/")
-    
-    def log_prompt_response(self, prompt: str, response: str, metadata: Dict[str, Any] = None):
+
+    def log_prompt_response(
+        self, prompt: str, response: str, metadata: Dict[str, Any] = None
+    ):
         """Save prompt and response to debug directory using wrapper_id"""
         if not self.debug_mode:
             return
-        
+
         # Use wrapper_id from metadata as directory name
-        wrapper_id = metadata.get('wrapper_id', 'unknown') if metadata else 'unknown'
+        wrapper_id = metadata.get("wrapper_id", "unknown") if metadata else "unknown"
         prompt_dir = os.path.join(self.debug_dir, str(wrapper_id))
-        
+
         try:
             os.makedirs(prompt_dir, exist_ok=True)
 
             # Save prompt
             prompt_file = os.path.join(prompt_dir, "prompt.txt")
-            with open(prompt_file, 'w', encoding='utf-8') as f:
+            with open(prompt_file, "w", encoding="utf-8") as f:
                 f.write(prompt)
 
             # Save response
             response_file = os.path.join(prompt_dir, "response.txt")
-            with open(response_file, 'w', encoding='utf-8') as f:
+            with open(response_file, "w", encoding="utf-8") as f:
                 f.write(response)
 
             # Save metadata if provided
             if metadata:
                 metadata_file = os.path.join(prompt_dir, "metadata.json")
-                with open(metadata_file, 'w', encoding='utf-8') as f:
+                with open(metadata_file, "w", encoding="utf-8") as f:
                     json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
 
             print(f"Debug: Wrapper {wrapper_id} prompt saved to {prompt_dir}/")
 
         except (OSError, IOError, json.JSONDecodeError) as e:
             print(f"Error saving debug prompt for wrapper {wrapper_id}: {e}")
-    
+
     def log_error(self, error: str, context: Dict[str, Any] = None):
         """Save error to debug using wrapper_id"""
         if not self.debug_mode:
             return
-        
+
         # Use wrapper_id from context as directory name
-        wrapper_id = context.get('wrapper_id', 'unknown') if context else 'unknown'
+        wrapper_id = context.get("wrapper_id", "unknown") if context else "unknown"
         error_dir = os.path.join(self.debug_dir, f"{wrapper_id}_ERROR")
-        
+
         try:
             os.makedirs(error_dir, exist_ok=True)
 
             # Save error
             error_file = os.path.join(error_dir, "error.txt")
-            with open(error_file, 'w', encoding='utf-8') as f:
+            with open(error_file, "w", encoding="utf-8") as f:
                 f.write(f"ERROR: {error}\n")
                 f.write(f"Timestamp: {datetime.now().isoformat()}\n")
                 if context:
-                    f.write(f"\nContext:\n{json.dumps(context, indent=2, ensure_ascii=False, default=str)}")
+                    f.write(
+                        f"\nContext:\n{json.dumps(context, indent=2, ensure_ascii=False, default=str)}"
+                    )
 
             print(f"Debug: Wrapper {wrapper_id} error saved to {error_dir}/")
 
         except (OSError, IOError, json.JSONDecodeError) as e:
             print(f"Error saving debug error for wrapper {wrapper_id}: {e}")
 
+    def log_generation_trace(self, wrapper_id: str, trace: Dict[str, Any]):
+        """Save full generation trace including requests, responses, and tool calls"""
+        if not self.debug_mode:
+            return
+
+        prompt_dir = os.path.join(self.debug_dir, str(wrapper_id))
+
+        try:
+            os.makedirs(prompt_dir, exist_ok=True)
+
+            trace_file = os.path.join(prompt_dir, "generation_trace.json")
+            with open(trace_file, "w", encoding="utf-8") as f:
+                json.dump(trace, f, indent=2, ensure_ascii=False, default=str)
+
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            print(f"Error saving generation trace for wrapper {wrapper_id}: {e}")
+
+    def log_lint_result(self, wrapper_id: str, lint_result: Dict[str, Any]):
+        """Save lint check result to debug directory"""
+        if not self.debug_mode:
+            return
+
+        prompt_dir = os.path.join(self.debug_dir, str(wrapper_id))
+
+        try:
+            os.makedirs(prompt_dir, exist_ok=True)
+
+            lint_file = os.path.join(prompt_dir, "lint_result.json")
+            with open(lint_file, "w", encoding="utf-8") as f:
+                json.dump(lint_result, f, indent=2, ensure_ascii=False, default=str)
+
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            print(f"Error saving lint result for wrapper {wrapper_id}: {e}")
+
+
 class WrapperGenerator:
-    def __init__(self, gemini_api_key: str, rabbitmq_url: str = "amqp://guest:guest@localhost/", debug_mode: bool = False, debug_dir: str = "prompts", model_name: str = "gemini-2.5-flash"):
+    def __init__(
+        self,
+        gemini_api_key: str,
+        rabbitmq_url: str = "amqp://guest:guest@localhost/",
+        debug_mode: bool = False,
+        debug_dir: str = "prompts",
+        model_name: str = "gemini-2.5-flash",
+    ):
         """
         Initialize the wrapper generator with Gemini API key and RabbitMQ connection
-        
+
         Args:
             gemini_api_key: API key for Gemini
             rabbitmq_url: RabbitMQ connection URL
@@ -145,19 +203,192 @@ class WrapperGenerator:
         self.model_name = model_name
         self.prompt_manager = PromptManager()
 
+    def _build_api_auth_config(self, source_config: DataSourceConfig) -> Dict[str, Any]:
+        auth_config: Dict[str, Any] = {}
+        if getattr(source_config, "auth_type", None) == "api_key" and getattr(
+            source_config, "api_key", None
+        ):
+            auth_config["api_key"] = source_config.api_key
+            auth_config["header_name"] = (
+                getattr(source_config, "api_key_header", None) or "X-API-Key"
+            )
+        elif getattr(source_config, "auth_type", None) == "bearer" and getattr(
+            source_config, "bearer_token", None
+        ):
+            auth_config["headers"] = {
+                "Authorization": f"Bearer {source_config.bearer_token}"
+            }
+        elif (
+            getattr(source_config, "auth_type", None) == "basic"
+            and getattr(source_config, "username", None)
+            and getattr(source_config, "password", None)
+        ):
+            import base64
+
+            credentials = base64.b64encode(
+                f"{source_config.username}:{source_config.password}".encode()
+            ).decode()
+            auth_config["headers"] = {"Authorization": f"Basic {credentials}"}
+
+        if getattr(source_config, "custom_headers", None):
+            auth_config.setdefault("headers", {}).update(source_config.custom_headers)
+        if getattr(source_config, "query_params", None):
+            auth_config["params"] = source_config.query_params
+
+        return auth_config
+
+    def _validate_generated_code(self, generated_code: str) -> Optional[str]:
+        try:
+            ast.parse(generated_code)
+        except SyntaxError as e:
+            return f"SyntaxError at line {e.lineno}, col {e.offset}: {e.msg}"
+
+        if re.search(r"^\s*\.\.\.\s*$", generated_code, re.MULTILINE):
+            return "Critical linting error: unresolved placeholder '...' found in code"
+        if "PLACEHOLDER" in generated_code:
+            return "Critical linting error: unresolved PLACEHOLDER token found in code"
+
+        return None
+
+    async def _call_model(self, prompt: str) -> str:
+        response = await self.client.aio.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+        )
+        return (response.text or "").strip()
+
+    async def _call_model_with_tools(
+        self,
+        prompt: str,
+        auth_config: Dict[str, Any],
+        max_tool_calls: int = 10,
+        max_chars: int = 2500,
+        wrapper_id: str = None,
+    ) -> str:
+        runtime = create_tool_runtime(
+            auth_config=auth_config,
+            max_chars=max_chars,
+        )
+
+        config = types.GenerateContentConfig(
+            tools=runtime.get_tools(),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                disable=True
+            ),
+            tool_config=types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(mode="AUTO")
+            ),
+        )
+
+        contents: List[types.Content] = [
+            types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
+        ]
+        tool_calls_used = 0
+        trace: Dict[str, Any] = {
+            "initial_prompt": prompt,
+            "turns": [],
+            "tool_calls": [],
+            "final_response": None,
+        }
+
+        while True:
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=config,
+            )
+
+            function_calls = response.function_calls or []
+
+            turn_data = {
+                "timestamp": datetime.now().isoformat(),
+                "has_function_calls": bool(function_calls),
+                "function_call_count": len(function_calls),
+                "response_text": response.text if not function_calls else None,
+            }
+            trace["turns"].append(turn_data)
+
+            if not function_calls:
+                trace["final_response"] = (response.text or "").strip()
+                if wrapper_id:
+                    self.debug_logger.log_generation_trace(wrapper_id, trace)
+                return trace["final_response"]
+
+            if response.candidates and response.candidates[0].content:
+                contents.append(response.candidates[0].content)
+
+            for function_call in function_calls:
+                if tool_calls_used >= max_tool_calls:
+                    break
+
+                tool_result = runtime.execute(
+                    function_name=function_call.name,
+                    args=dict(function_call.args or {}),
+                )
+
+                tool_calls_used += 1
+
+                tool_call_event = {
+                    "tool": function_call.name,
+                    "args": dict(function_call.args or {}),
+                    "result": tool_result,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                trace["tool_calls"].append(tool_call_event)
+
+                contents.append(
+                    types.Content(
+                        role="tool",
+                        parts=[
+                            types.Part.from_function_response(
+                                name=function_call.name,
+                                response=tool_result,
+                            )
+                        ],
+                    )
+                )
+
+            if tool_calls_used >= max_tool_calls:
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_text(
+                                text="Tool call limit reached. Use available fetched samples and return the complete Python wrapper code now."
+                            )
+                        ],
+                    )
+                )
+                final_response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(),
+                )
+                trace["final_response"] = (final_response.text or "").strip()
+                trace["turns"].append(
+                    {
+                        "timestamp": datetime.now().isoformat(),
+                        "forced_completion": True,
+                        "response_text": trace["final_response"],
+                    }
+                )
+                if wrapper_id:
+                    self.debug_logger.log_generation_trace(wrapper_id, trace)
+                return trace["final_response"]
+
     def get_csv_sample(self, file_path: str, max_lines: int = 20) -> str:
         """
         Extract first 20 lines from CSV file for analysis
         """
         try:
             sample_lines = []
-            with open(file_path, 'r', encoding='utf-8') as file:
+            with open(file_path, "r", encoding="utf-8") as file:
                 for i, line in enumerate(file):
                     if i >= max_lines:
                         break
                     sample_lines.append(line.strip())
 
-            return '\n'.join(sample_lines)
+            return "\n".join(sample_lines)
         except (FileNotFoundError, IOError, UnicodeDecodeError) as e:
             return f"Error reading CSV file: {str(e)}"
 
@@ -169,31 +400,37 @@ class WrapperGenerator:
             # Read Excel file and get all sheet names
             excel_file = pd.ExcelFile(file_path)
             sheet_names = excel_file.sheet_names
-            
+
             sample_data = []
             sample_data.append(f"XLSX File: {file_path}")
             sample_data.append(f"Total sheets: {len(sheet_names)}")
             sample_data.append(f"Sheet names: {sheet_names}")
             sample_data.append("")
-            
+
             # Sample from each sheet
             for sheet_name in sheet_names:
                 sample_data.append(f"=== Sheet: {sheet_name} ===")
                 try:
-                    df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=max_lines_per_sheet)
+                    df = pd.read_excel(
+                        file_path, sheet_name=sheet_name, nrows=max_lines_per_sheet
+                    )
                     sample_data.append(f"Columns: {list(df.columns)}")
                     sample_data.append(f"Shape: {df.shape}")
                     sample_data.append("Sample data:")
                     sample_data.append(df.to_string())
                 except (pd.errors.ParserError, ValueError) as sheet_error:
-                    sample_data.append(f"Error reading sheet {sheet_name}: {sheet_error}")
+                    sample_data.append(
+                        f"Error reading sheet {sheet_name}: {sheet_error}"
+                    )
                 sample_data.append("")
 
-            return '\n'.join(sample_data)
+            return "\n".join(sample_data)
         except (FileNotFoundError, IOError, pd.errors.ParserError, ValueError) as e:
             return f"Error reading XLSX file: {str(e)}"
 
-    def get_api_sample(self, endpoint: str, auth_config: Dict[str, Any], max_chars: int = 2500) -> str:
+    def get_api_sample(
+        self, endpoint: str, auth_config: Dict[str, Any], max_chars: int = 2500
+    ) -> str:
         """
         Make API call and return response sample
         """
@@ -201,26 +438,23 @@ class WrapperGenerator:
             print(f"Making API sample call to: {endpoint}")
             print(f"Auth config: {auth_config}")
             # Prepare headers
-            headers = auth_config.get('headers', {})
-            
+            headers = auth_config.get("headers", {})
+
             # Add API key to headers if specified
-            if 'api_key' in auth_config and 'header_name' in auth_config:
-                headers[auth_config['header_name']] = auth_config['api_key']
-            
+            if "api_key" in auth_config and "header_name" in auth_config:
+                headers[auth_config["header_name"]] = auth_config["api_key"]
+
             # Prepare parameters
-            params = auth_config.get('params', {})
-            
+            params = auth_config.get("params", {})
+
             # Make API call with timeout
             response = requests.get(
-                endpoint, 
-                headers=headers, 
-                params=params,
-                timeout=30
+                endpoint, headers=headers, params=params, timeout=30
             )
-            
+
             # Check if request was successful
             response.raise_for_status()
-            
+
             # Try to parse as JSON
             try:
                 json_data = response.json()
@@ -241,15 +475,19 @@ class WrapperGenerator:
         except (json.JSONDecodeError, ValueError) as e:
             return f"Error parsing API response: {str(e)}"
 
-    async def generate_wrapper(self,
-                             indicator_metadata: IndicatorMetadata,
-                             source_config: DataSourceConfig,
-                             source_type: str,
-                             wrapper_id: str) -> str:
+    async def generate_wrapper(
+        self,
+        indicator_metadata: IndicatorMetadata,
+        source_config: DataSourceConfig,
+        source_type: str,
+        wrapper_id: str,
+    ) -> str:
         """
         Use Gemini to generate a customized wrapper based on indicator metadata and source configuration
         Note: source_config.location is always populated (computed from file_id for CSV/XLSX in the route handler)
         """
+
+        auth_config: Dict[str, Any] = {}
 
         # Get data sample based on source type
         print(f"Extracting sample from {source_type} source...")
@@ -258,29 +496,16 @@ class WrapperGenerator:
         elif source_type == "XLSX":
             data_sample = self.get_xlsx_sample(source_config.location)
         elif source_type == "API":
-            # Convert new API config format to legacy auth_config for compatibility
-            auth_config = {}
-            if source_config.auth_type == "api_key" and source_config.api_key:
-                auth_config['api_key'] = source_config.api_key
-                auth_config['header_name'] = source_config.api_key_header or "X-API-Key"
-            elif source_config.auth_type == "bearer" and source_config.bearer_token:
-                auth_config['headers'] = {"Authorization": f"Bearer {source_config.bearer_token}"}
-            elif source_config.auth_type == "basic" and source_config.username and source_config.password:
-                import base64
-                credentials = base64.b64encode(f"{source_config.username}:{source_config.password}".encode()).decode()
-                auth_config['headers'] = {"Authorization": f"Basic {credentials}"}
-            
-            # Add custom headers and query params
-            if source_config.custom_headers:
-                auth_config.setdefault('headers', {}).update(source_config.custom_headers)
-            if source_config.query_params:
-                auth_config['params'] = source_config.query_params
-                
+            auth_config = self._build_api_auth_config(source_config)
             data_sample = self.get_api_sample(source_config.location, auth_config)
         else:
             data_sample = "Unknown source type"
-        
-        print(f"Data sample: {data_sample[:400]}" + "..." if len(data_sample) > 400 else "")
+
+        print(
+            f"Data sample: {data_sample[:400]}" + "..."
+            if len(data_sample) > 400
+            else ""
+        )
 
         prompt = self.prompt_manager.generate_wrapper_prompt(
             indicator_metadata, source_config, source_type, wrapper_id, data_sample
@@ -294,54 +519,94 @@ class WrapperGenerator:
             "source_location": source_config.location,
             "timestamp": datetime.now().isoformat(),
             "prompt_length": len(prompt),
-            "data_sample_length": len(data_sample)
+            "data_sample_length": len(data_sample),
         }
 
         try:
             print("Calling Gemini...")
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=prompt
-            )
-            generated_code = response.text.strip()
-            
+            if source_type == "API":
+                generated_code = await self._call_model_with_tools(
+                    prompt=prompt,
+                    auth_config=auth_config,
+                    max_tool_calls=10,
+                    max_chars=8000,
+                    wrapper_id=wrapper_id,
+                )
+            else:
+                generated_code = await self._call_model(prompt)
+
             # Log prompt and response in debug mode
             self.debug_logger.log_prompt_response(
-                prompt=prompt,
-                response=generated_code,
-                metadata=debug_metadata
+                prompt=prompt, response=generated_code, metadata=debug_metadata
             )
-            
+
             # Clean markdown code block markers if present
             generated_code = self._clean_code_response(generated_code)
-            
+
             # Verify that the code was actually customized (not just the template)
-            template_code = get_wrapper_template(source_type, indicator_metadata.periodicity)
+            template_code = self.prompt_manager.get_wrapper_template(
+                source_type, indicator_metadata.periodicity
+            )
             if generated_code == template_code:
                 error_msg = "Gemini returned unchanged template"
-                
+
                 # If debug_mode is activated, show prompt and response
                 if self.debug_logger.debug_mode:
-                    print(f"\n{'='*80}")
+                    print(f"\n{'=' * 80}")
                     print(f"DEBUG: {error_msg}")
                     print(f"Wrapper ID: {wrapper_id}")
-                    print(f"{'='*80}")
+                    print(f"{'=' * 80}")
                     print(f"\nPROMPT SENT TO GEMINI:")
-                    print(f"{'-'*40}")
+                    print(f"{'-' * 40}")
                     print(prompt[:2000] + "..." if len(prompt) > 2000 else prompt)
-                    print(f"\n{'-'*40}")
+                    print(f"\n{'-' * 40}")
                     print(f"\nGEMINI RESPONSE:")
-                    print(f"{'-'*40}")
-                    print(generated_code[:2000] + "..." if len(generated_code) > 2000 else generated_code)
-                    print(f"\n{'-'*40}")
+                    print(f"{'-' * 40}")
+                    print(
+                        generated_code[:2000] + "..."
+                        if len(generated_code) > 2000
+                        else generated_code
+                    )
+                    print(f"\n{'-' * 40}")
                     print(f"Response length: {len(generated_code)} characters")
                     print(f"Contains PLACEHOLDER: {'PLACEHOLDER' in generated_code}")
                     print(f"Contains ...: {'...' in generated_code}")
                     print(f"Equals template: {generated_code == template_code}")
-                    print(f"{'='*80}\n")
-                
+                    print(f"{'=' * 80}\n")
+
                 self.debug_logger.log_error(error_msg, debug_metadata)
                 raise ValueError(error_msg)
+
+            lint_error = self._validate_generated_code(generated_code)
+
+            self.debug_logger.log_lint_result(
+                wrapper_id,
+                {
+                    "passed": lint_error is None,
+                    "error": lint_error,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+
+            if lint_error:
+                retry_prompt = self.prompt_manager.generate_wrapper_lint_retry_prompt(
+                    generated_code=generated_code,
+                    linting_errors=lint_error,
+                )
+                retry_response = await self._call_model(retry_prompt)
+
+                self.debug_logger.log_prompt_response(
+                    prompt=retry_prompt,
+                    response=retry_response,
+                    metadata={**debug_metadata, "stage": "lint_retry"},
+                )
+
+                generated_code = self._clean_code_response(retry_response)
+                retry_lint_error = self._validate_generated_code(generated_code)
+                if retry_lint_error:
+                    raise ValueError(
+                        f"Critical linting errors after retry: {retry_lint_error}"
+                    )
 
             return generated_code
 
@@ -360,19 +625,18 @@ class WrapperGenerator:
         Clean markdown code block markers from Gemini response
         """
         # Remove markdown code block markers
-        if code.startswith('```python'):
+        if code.startswith("```python"):
             code = code[9:]  # Remove ```python
-        elif code.startswith('```'):
-            code = code[3:]   # Remove ```
-        
-        if code.endswith('```'):
+        elif code.startswith("```"):
+            code = code[3:]  # Remove ```
+
+        if code.endswith("```"):
             code = code[:-3]  # Remove trailing ```
-        
+
         # Strip any remaining whitespace
         code = code.strip()
-        
-        return code
 
+        return code
 
     def save_wrapper(self, wrapper_code: str, wrapper_id: str) -> str:
         """
@@ -386,68 +650,90 @@ class WrapperGenerator:
         filename = f"{wrapper_id}.py"
         file_path = os.path.join(wrapper_dir, filename)
 
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(wrapper_code)
 
         print(f"Wrapper saved to: {file_path}")
         return file_path
 
-    async def execute_wrapper(self, wrapper_file: str, wrapper_id: int, mode: str = "once", timeout_seconds: int = 8):
+    async def execute_wrapper(
+        self,
+        wrapper_file: str,
+        wrapper_id: int,
+        mode: str = "once",
+        timeout_seconds: int = 8,
+    ):
         """
         Execute the generated wrapper with timeout
         """
         try:
             # Load and execute the wrapper module
-            spec = importlib.util.spec_from_file_location(f"wrapper_{wrapper_id}", wrapper_file)
+            spec = importlib.util.spec_from_file_location(
+                f"wrapper_{wrapper_id}", wrapper_file
+            )
             wrapper_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(wrapper_module)
-            
+
             # Create wrapper instance
             wrapper = wrapper_module.ATTWrapper(wrapper_id)
-            
+
             # Execute wrapper with timeout
             try:
                 if mode == "once":
                     await asyncio.wait_for(wrapper.run_once(), timeout=timeout_seconds)
                 else:
                     # For continuous mode, the wrapper handles its own scheduling
-                    await asyncio.wait_for(wrapper.run_continuous(), timeout=timeout_seconds)
-                    
+                    await asyncio.wait_for(
+                        wrapper.run_continuous(), timeout=timeout_seconds
+                    )
+
             except asyncio.TimeoutError:
-                print(f"Wrapper {wrapper_id} execution timed out after {timeout_seconds} seconds")
+                print(
+                    f"Wrapper {wrapper_id} execution timed out after {timeout_seconds} seconds"
+                )
                 # Timeout is expected for continuous mode, not an error
                 if mode == "continuous":
-                    print(f"Continuous wrapper {wrapper_id} stopped after timeout (normal behavior)")
+                    print(
+                        f"Continuous wrapper {wrapper_id} stopped after timeout (normal behavior)"
+                    )
                 else:
-                    print(f"Warning: 'once' mode wrapper {wrapper_id} timed out (may indicate an issue)")
+                    print(
+                        f"Warning: 'once' mode wrapper {wrapper_id} timed out (may indicate an issue)"
+                    )
 
         except (ImportError, AttributeError, FileNotFoundError) as e:
             print(f"Error executing wrapper: {str(e)}")
             raise
 
-    async def generate_and_run_wrapper(self, 
-                                     indicator_metadata: IndicatorMetadata,
-                                     source_config: DataSourceConfig,
-                                     wrapper_id: int,
-                                     mode: str = "once"):
+    async def generate_and_run_wrapper(
+        self,
+        indicator_metadata: IndicatorMetadata,
+        source_config: DataSourceConfig,
+        wrapper_id: int,
+        mode: str = "once",
+    ):
         """
         Complete workflow: generate, save and execute wrapper
         """
-        print(f"Generating wrapper {wrapper_id} for indicator: {indicator_metadata.name}...")
-        
+        print(
+            f"Generating wrapper {wrapper_id} for indicator: {indicator_metadata.name}..."
+        )
+
         # Generate wrapper code
         wrapper_code = await self.generate_wrapper(
-            indicator_metadata, 
-            source_config, 
-            wrapper_id
+            indicator_metadata,
+            source_config,
+            source_config.source_type,
+            str(wrapper_id),
         )
-        
+
         # Save to file
-        wrapper_file = self.save_wrapper(wrapper_code, wrapper_id, indicator_metadata.name)
-        
+        wrapper_file = self.save_wrapper(wrapper_code, str(wrapper_id))
+
         # Execute wrapper
         print(f"Executing wrapper {wrapper_id} in {mode} mode...")
         await self.execute_wrapper(wrapper_file, wrapper_id, mode, timeout_seconds=60)
+
 
 def create_wrapper_from_config(
     # Indicator metadata
@@ -469,11 +755,11 @@ def create_wrapper_from_config(
     gemini_api_key: str,
     mode: str = "once",
     auth_config: Optional[Dict[str, Any]] = None,
-    model_name: str = "gemini-2.5-flash"
+    model_name: str = "gemini-2.5-flash",
 ) -> None:
     """
     Utility function to create a wrapper from configuration parameters
-    
+
     Args:
         indicator_name: Name of the indicator
         domain: Main domain (e.g., "Economy", "Environment")
@@ -493,9 +779,10 @@ def create_wrapper_from_config(
         auth_config: Authentication configuration for APIs (optional)
         model_name: Gemini model name to use (default: gemini-2.5-flash)
     """
+
     async def _create_wrapper():
         generator = WrapperGenerator(gemini_api_key, model_name=model_name)
-        
+
         metadata = IndicatorMetadata(
             name=indicator_name,
             domain=domain,
@@ -506,26 +793,25 @@ def create_wrapper_from_config(
             scale=scale,
             governance_indicator=governance_indicator,
             carrying_capacity=carrying_capacity,
-            periodicity=periodicity
+            periodicity=periodicity,
         )
-        
+
         source_config = DataSourceConfig(
-            source_type=source_type,
-            location=location,
-            auth_config=auth_config
+            source_type=source_type, location=location, auth_config=auth_config
         )
-    
+
         await generator.generate_and_run_wrapper(
             indicator_metadata=metadata,
             source_config=source_config,
             wrapper_id=wrapper_id,
-            mode=mode
+            mode=mode,
         )
-    
+
     asyncio.run(_create_wrapper())
+
 
 if __name__ == "__main__":
     print("WrapperGenerator module loaded successfully!")
     print("Use integration_tests.py to run integration tests")
     print("Use test_wrapper_generator.py to run unit tests")
-    print("Use example_usage.py to see usage examples") 
+    print("Use example_usage.py to see usage examples")

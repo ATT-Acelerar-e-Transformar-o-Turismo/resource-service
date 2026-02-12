@@ -9,11 +9,14 @@ class Settings(BaseSettings):
         default="amqp://guest:guest@rabbitmq/", env="RABBITMQ_URL"
     )
     RESOURCE_DATA_QUEUE: str = Field(default="resource_data", env="RESOURCE_DATA_QUEUE")
+    RESOURCE_DELETED_QUEUE: str = Field(
+        default="resource_deleted", env="RESOURCE_DELETED_QUEUE"
+    )
     COLLECTED_DATA_QUEUE: str = Field(
         default="collected_data", env="COLLECTED_DATA_QUEUE"
     )
     CHUNK_SIZE_THRESHOLD: int = Field(default=1000, env="CHUNK_SIZE_THRESHOLD")
-    
+
     # Wrapper Generation
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
     GEMINI_MODEL_NAME: str = Field(default="gemini-1.5-flash", env="GEMINI_MODEL_NAME")
@@ -22,7 +25,13 @@ class Settings(BaseSettings):
     )
     DATA_QUEUE_NAME: str = Field(default="data_queue", env="DATA_QUEUE_NAME")
 
-    WRAPPER_CREATION_QUEUE_NAME: str = Field(default="wrapper_creation_queue", env="WRAPPER_CREATION_QUEUE_NAME")
+    WRAPPER_CREATION_QUEUE_NAME: str = Field(
+        default="wrapper_creation_queue", env="WRAPPER_CREATION_QUEUE_NAME"
+    )
+
+    WRAPPER_GENERATION_DEBUG_MODE: bool = Field(
+        default=False, env="WRAPPER_GENERATION_DEBUG_MODE"
+    )
 
     class Config:
         env_file = ".env"

@@ -1,18 +1,20 @@
 import asyncio
 import subprocess
-import tempfile
 import os
+import re
 import signal
 import logging
 from typing import Dict, Optional, List
 from datetime import datetime
-from bson.objectid import ObjectId
 from pymongo.errors import OperationFailure
 from dependencies.database import db
-from schemas.wrapper import WrapperStatus, GeneratedWrapper, DataSourceConfig
+from schemas.wrapper import WrapperStatus, DataSourceConfig
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+WRAPPER_DIR = "/app/generated_wrappers"
+
 
 class WrapperProcess:
     def __init__(self, wrapper_id: str, process: subprocess.Popen, temp_file_path: str):
@@ -22,19 +24,96 @@ class WrapperProcess:
         self.started_at = datetime.utcnow()
         self.last_health_check = datetime.utcnow()
 
+
+class _AdoptedProcess:
+    """Minimal wrapper around an OS PID not started by this manager"""
+
+    def __init__(self, pid: int):
+        self._pid = pid
+
+    def poll(self) -> Optional[int]:
+        try:
+            os.kill(self._pid, 0)
+            return None
+        except ProcessLookupError:
+            return -1
+        except PermissionError:
+            return None
+
+    def terminate(self):
+        os.kill(self._pid, signal.SIGTERM)
+
+    def kill(self):
+        os.kill(self._pid, signal.SIGKILL)
+
+    def wait(self, timeout=None):
+        pass
+
+    @property
+    def pid(self):
+        return self._pid
+
+
 class WrapperProcessManager:
     def __init__(self):
         self.running_processes: Dict[str, WrapperProcess] = {}
         self.monitoring_task: Optional[asyncio.Task] = None
-    
+
     async def start_monitoring(self):
         """Start background monitoring of wrapper processes"""
         if self.monitoring_task and not self.monitoring_task.done():
             return
-        
+
+        self._adopt_orphaned_processes()
+
         self.monitoring_task = asyncio.create_task(self._monitor_processes())
         logger.info("Wrapper process monitoring started")
-    
+
+    def _adopt_orphaned_processes(self):
+        """Scan /proc for wrapper processes not tracked by this manager.
+
+        This handles uvicorn --reload or service restart where child processes
+        survive but the in-memory dict is lost.
+        """
+        adopted = 0
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                pid = int(entry)
+                try:
+                    cmdline_path = f"/proc/{pid}/cmdline"
+                    with open(cmdline_path, "rb") as f:
+                        cmdline = f.read().decode("utf-8", errors="replace")
+
+                    if WRAPPER_DIR not in cmdline:
+                        continue
+
+                    match = re.search(r"/([0-9a-f\-]{36})\.py", cmdline)
+                    if not match:
+                        continue
+
+                    wrapper_id = match.group(1)
+                    if wrapper_id in self.running_processes:
+                        continue
+
+                    wrapper_file = f"{WRAPPER_DIR}/{wrapper_id}.py"
+                    process = _AdoptedProcess(pid)
+                    wp = WrapperProcess(wrapper_id, process, wrapper_file)
+                    self.running_processes[wrapper_id] = wp
+                    adopted += 1
+                    logger.info(
+                        f"Adopted orphaned wrapper process {wrapper_id} (pid {pid})"
+                    )
+
+                except (IOError, OSError, ValueError):
+                    continue
+        except OSError as e:
+            logger.error(f"Failed to scan /proc for orphaned processes: {e}")
+
+        if adopted:
+            logger.info(f"Adopted {adopted} orphaned wrapper process(es)")
+
     async def stop_monitoring(self):
         """Stop background monitoring"""
         if self.monitoring_task:
@@ -44,7 +123,7 @@ class WrapperProcessManager:
             except asyncio.CancelledError:
                 pass
         logger.info("Wrapper process monitoring stopped")
-    
+
     async def _monitor_processes(self):
         """Background task to monitor wrapper processes"""
         while True:
@@ -80,10 +159,15 @@ class WrapperProcessManager:
             except IOError as e:
                 logger.warning(f"Failed to append exit info to {stdout_log_path}: {e}")
 
-            logger.info(f"Appended exit information (code {exit_code}) to log file for wrapper {wrapper_id}")
+            logger.info(
+                f"Appended exit information (code {exit_code}) to log file for wrapper {wrapper_id}"
+            )
 
         except (IOError, OSError) as e:
-            logger.error(f"Error appending exit info to logs for wrapper {wrapper_id}: {e}", exc_info=True)
+            logger.error(
+                f"Error appending exit info to logs for wrapper {wrapper_id}: {e}",
+                exc_info=True,
+            )
 
     async def _check_process_health(self):
         """Check health of all running processes"""
@@ -97,7 +181,9 @@ class WrapperProcessManager:
                     # Process has terminated
                     dead_processes.append(wrapper_id)
 
-                    logger.info(f"Wrapper {wrapper_id} process terminated with exit code {exit_code}")
+                    logger.info(
+                        f"Wrapper {wrapper_id} process terminated with exit code {exit_code}"
+                    )
 
                     # Append exit information to log files (never delete logs!)
                     await self._append_exit_info_to_logs(wrapper_id, exit_code)
@@ -105,61 +191,91 @@ class WrapperProcessManager:
                     await db.generated_wrappers.update_one(
                         {"wrapper_id": wrapper_id},
                         {
-                            "$set": {"status": WrapperStatus.COMPLETED if exit_code == 0 else WrapperStatus.ERROR},
-                            "$push": {"execution_log": f"Process terminated at {datetime.utcnow()} with exit code {exit_code}"}
-                        }
+                            "$set": {
+                                "status": WrapperStatus.COMPLETED
+                                if exit_code == 0
+                                else WrapperStatus.ERROR
+                            },
+                            "$push": {
+                                "execution_log": f"Process terminated at {datetime.utcnow()} with exit code {exit_code}"
+                            },
+                        },
                     )
-                    
+
                 else:
                     # Process is running, update health check
                     wrapper_process.last_health_check = datetime.utcnow()
 
             except (OSError, OperationFailure) as e:
-                logger.error(f"Health check failed for wrapper {wrapper_id}: {e}", exc_info=True)
-        
+                logger.error(
+                    f"Health check failed for wrapper {wrapper_id}: {e}", exc_info=True
+                )
+
         # Clean up dead processes
         for wrapper_id in dead_processes:
             await self._cleanup_process(wrapper_id)
-    
-    async def start_wrapper_process(self, wrapper_id: str, wrapper_file_path: str, source_config: DataSourceConfig, skip_historical: bool = False) -> bool:
-        """ Start a wrapper in a separate process
-            location can be a file path, an url, etc.
+
+    async def start_wrapper_process(
+        self,
+        wrapper_id: str,
+        wrapper_file_path: str,
+        source_config: DataSourceConfig,
+        skip_historical: bool = False,
+        resume_phase: Optional[str] = None,
+        resume_high_water_mark: Optional[str] = None,
+        resume_low_water_mark: Optional[str] = None,
+    ) -> bool:
+        """Start a wrapper in a separate process.
+
+        Args:
+            resume_phase: "historical" or "continuous" — which phase was active before stop
+            resume_high_water_mark: ISO timestamp of newest data point ever sent
+            resume_low_water_mark: ISO timestamp of oldest data point ever sent
         """
         try:
-            # Check if already running
             if wrapper_id in self.running_processes:
                 logger.warning(f"Wrapper {wrapper_id} is already running")
                 return False
 
-            # Check if wrapper file exists
             if not os.path.exists(wrapper_file_path):
                 logger.error(f"Wrapper file not found: {wrapper_file_path}")
                 return False
-            
-            # Start process
-            env = os.environ.copy()
-            env['DATA_RABBITMQ_URL'] = settings.DATA_RABBITMQ_URL
-            env['AMQP_URL'] = settings.DATA_RABBITMQ_URL  # This is what wrappers actually look for
-            env['WRAPPER_ID'] = wrapper_id
-            env['PYTHONPATH'] = '/app/wrapper_runtime/shared:' + env.get('PYTHONPATH', '')
 
-            # Create log files for wrapper output
+            env = os.environ.copy()
+            env["DATA_RABBITMQ_URL"] = settings.DATA_RABBITMQ_URL
+            env["AMQP_URL"] = settings.DATA_RABBITMQ_URL
+            env["WRAPPER_ID"] = wrapper_id
+            env["PYTHONPATH"] = "/app/wrapper_runtime/shared:" + env.get(
+                "PYTHONPATH", ""
+            )
+            if resume_phase:
+                env["RESUME_PHASE"] = resume_phase
+            if resume_high_water_mark:
+                env["RESUME_HIGH_WATER_MARK"] = resume_high_water_mark
+            if resume_low_water_mark:
+                env["RESUME_LOW_WATER_MARK"] = resume_low_water_mark
+
             log_dir = "/app/wrapper_logs"
             os.makedirs(log_dir, exist_ok=True)
             stdout_log = open(f"{log_dir}/{wrapper_id}_stdout.log", "w")
             stderr_log = open(f"{log_dir}/{wrapper_id}_stderr.log", "w")
 
-            # Build command arguments
-            cmd_args = ['python', '-u', wrapper_file_path, wrapper_id, source_config.model_dump_json()]
+            cmd_args = [
+                "python",
+                "-u",
+                wrapper_file_path,
+                wrapper_id,
+                source_config.model_dump_json(),
+            ]
             if skip_historical:
-                cmd_args.append('--skip-historical')
+                cmd_args.append("--skip-historical")
 
             process = subprocess.Popen(
                 cmd_args,
                 env=env,
                 stdout=stdout_log,
                 stderr=stderr_log,
-                preexec_fn=os.setsid  # Create new process group
+                preexec_fn=os.setsid,  # Create new process group
             )
 
             # Store process info
@@ -171,17 +287,21 @@ class WrapperProcessManager:
                 {"wrapper_id": wrapper_id},
                 {
                     "$set": {"status": WrapperStatus.EXECUTING.value},
-                    "$push": {"execution_log": f"Started process at {datetime.utcnow()}"}
-                }
+                    "$push": {
+                        "execution_log": f"Started process at {datetime.utcnow()}"
+                    },
+                },
             )
-            
+
             logger.info(f"Started wrapper {wrapper_id} in process {process.pid}")
             return True
 
         except (OSError, IOError, ValueError, OperationFailure) as e:
-            logger.error(f"Failed to start wrapper process {wrapper_id}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to start wrapper process {wrapper_id}: {e}", exc_info=True
+            )
             return False
-    
+
     async def _cleanup_process(self, wrapper_id: str):
         """Properly clean up process resources"""
         if wrapper_id not in self.running_processes:
@@ -193,7 +313,9 @@ class WrapperProcessManager:
         try:
             # Ensure process is terminated
             if wrapper_process.process.poll() is None:
-                logger.info(f"Terminating still-running process for wrapper {wrapper_id}")
+                logger.info(
+                    f"Terminating still-running process for wrapper {wrapper_id}"
+                )
                 wrapper_process.process.terminate()
                 try:
                     # Wait for graceful termination
@@ -209,12 +331,25 @@ class WrapperProcessManager:
             # Remove from tracking
             del self.running_processes[wrapper_id]
 
-            logger.info(f"Successfully cleaned up process resources for wrapper {wrapper_id}")
+            logger.info(
+                f"Successfully cleaned up process resources for wrapper {wrapper_id}"
+            )
 
         except (ProcessLookupError, OSError, subprocess.SubprocessError) as e:
-            logger.error(f"Error during process cleanup for wrapper {wrapper_id}: {e}", exc_info=True)
+            logger.error(
+                f"Error during process cleanup for wrapper {wrapper_id}: {e}",
+                exc_info=True,
+            )
             if wrapper_id in self.running_processes:
                 del self.running_processes[wrapper_id]
+
+    async def stop_wrapper_process(self, wrapper_id: str) -> bool:
+        """Stop a running wrapper process by wrapper ID."""
+        if wrapper_id not in self.running_processes:
+            return False
+        await self._cleanup_process(wrapper_id)
+        return True
+
 
 # Global process manager instance
 wrapper_process_manager = WrapperProcessManager()

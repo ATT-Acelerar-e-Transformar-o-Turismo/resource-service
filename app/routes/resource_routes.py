@@ -19,6 +19,12 @@ from schemas.resource import (
 
 router = APIRouter()
 
+
+@router.get("/version")
+def get_version():
+    return {"service": "resource-service", "version": "1.0.0"}
+
+
 RESOURCE_NOT_FOUND = "Resource not found"
 INVALID_RESOURCE_ID = "Invalid resource ID"
 

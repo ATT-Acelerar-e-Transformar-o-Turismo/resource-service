@@ -4,18 +4,27 @@ from datetime import datetime
 from enum import Enum
 import uuid
 
+
 class SourceType(str, Enum):
     API = "API"
     CSV = "CSV"
     XLSX = "XLSX"
+
 
 class WrapperStatus(str, Enum):
     PENDING = "pending"
     GENERATING = "generating"
     CREATING_RESOURCE = "creating_resource"
     EXECUTING = "executing"
+    STOPPED = "stopped"
     COMPLETED = "completed"
     ERROR = "error"
+
+
+class WrapperPhase(str, Enum):
+    HISTORICAL = "historical"
+    CONTINUOUS = "continuous"
+
 
 class IndicatorMetadata(BaseModel):
     name: str = Field(..., description="Name of the sustainability indicator")
@@ -29,37 +38,66 @@ class IndicatorMetadata(BaseModel):
     carrying_capacity: Optional[float] = Field(None, description="Maximum capacity")
     periodicity: str = Field(..., description="Data collection frequency")
 
+
 # Source-specific configurations
 class CSVSourceConfig(BaseModel):
     file_id: str = Field(..., description="File ID for uploaded CSV file")
-    location: Optional[str] = Field(None, description="Computed file path (populated by backend)")
+    location: Optional[str] = Field(
+        None, description="Computed file path (populated by backend)"
+    )
+
 
 class XLSXSourceConfig(BaseModel):
     file_id: str = Field(..., description="File ID for uploaded XLSX file")
-    location: Optional[str] = Field(None, description="Computed file path (populated by backend)")
+    location: Optional[str] = Field(
+        None, description="Computed file path (populated by backend)"
+    )
+
 
 class APISourceConfig(BaseModel):
     location: str = Field(..., description="API endpoint URL")
-    auth_type: str = Field(default="none", description="Authentication type: 'bearer', 'api_key', 'basic', 'none'")
+    auth_type: str = Field(
+        default="none",
+        description="Authentication type: 'bearer', 'api_key', 'basic', 'none'",
+    )
     api_key: Optional[str] = Field(None, description="API key for authentication")
-    api_key_header: Optional[str] = Field(default="X-API-Key", description="Header name for API key")
-    bearer_token: Optional[str] = Field(None, description="Bearer token for authentication")
+    api_key_header: Optional[str] = Field(
+        default="X-API-Key", description="Header name for API key"
+    )
+    bearer_token: Optional[str] = Field(
+        None, description="Bearer token for authentication"
+    )
     username: Optional[str] = Field(None, description="Username for basic auth")
     password: Optional[str] = Field(None, description="Password for basic auth")
     timeout_seconds: int = Field(default=30, description="Request timeout in seconds")
-    date_field: Optional[str] = Field(None, description="Field name for date/timestamp in API response")
-    value_field: Optional[str] = Field(None, description="Field name for the indicator value in API response")
-    custom_headers: Dict[str, str] = Field(default_factory=dict, description="Additional custom headers")
-    query_params: Dict[str, str] = Field(default_factory=dict, description="Default query parameters")
+    date_field: Optional[str] = Field(
+        None, description="Field name for date/timestamp in API response"
+    )
+    value_field: Optional[str] = Field(
+        None, description="Field name for the indicator value in API response"
+    )
+    custom_headers: Dict[str, str] = Field(
+        default_factory=dict, description="Additional custom headers"
+    )
+    query_params: Dict[str, str] = Field(
+        default_factory=dict, description="Default query parameters"
+    )
+
 
 # Union type for source configs
 DataSourceConfig = Union[CSVSourceConfig, XLSXSourceConfig, APISourceConfig]
 
+
 class WrapperGenerationRequest(BaseModel):
     source_type: SourceType = Field(..., description="Type of data source")
-    source_config: DataSourceConfig = Field(..., description="Source-specific configuration")
+    source_config: DataSourceConfig = Field(
+        ..., description="Source-specific configuration"
+    )
     metadata: IndicatorMetadata
-    auto_create_resource: bool = Field(default=True, description="Automatically create resource")
+    auto_create_resource: bool = Field(
+        default=True, description="Automatically create resource"
+    )
+
 
 class GeneratedWrapper(BaseModel):
     wrapper_id: str
@@ -81,7 +119,17 @@ class GeneratedWrapper(BaseModel):
     data_points_count: int = 0
     monitoring_details: Dict[str, Any] = Field(default_factory=dict)
 
+    # Checkpoint fields for resumable execution
+    phase: WrapperPhase = Field(default=WrapperPhase.HISTORICAL)
+    high_water_mark: Optional[datetime] = Field(
+        None, description="Newest data point timestamp ever sent"
+    )
+    low_water_mark: Optional[datetime] = Field(
+        None, description="Oldest data point timestamp ever sent"
+    )
+
     execution_result: Optional["WrapperExecutionResult"] = None
+
 
 class WrapperExecutionResult(BaseModel):
     wrapper_id: str
@@ -90,11 +138,17 @@ class WrapperExecutionResult(BaseModel):
     data_points_sent: Optional[int] = None
     execution_time: datetime = Field(default_factory=datetime.utcnow)
 
+
 class AsyncWrapperCreationRequest(BaseModel):
     source_type: SourceType = Field(..., description="Type of data source")
-    source_config: DataSourceConfig = Field(..., description="Source-specific configuration")
+    source_config: DataSourceConfig = Field(
+        ..., description="Source-specific configuration"
+    )
     metadata: IndicatorMetadata
-    auto_create_resource: bool = Field(default=True, description="Automatically create resource")
+    auto_create_resource: bool = Field(
+        default=True, description="Automatically create resource"
+    )
+
 
 class AsyncWrapperCreationResponse(BaseModel):
     wrapper_id: str

@@ -10,6 +10,10 @@ services:
       - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-1.5-flash}
     depends_on:
       - resource-mongo
+    volumes:
+      - resource_generated_wrappers:/app/generated_wrappers
+      - resource_wrapper_logs:/app/wrapper_logs
+      - resource_prompts:/app/prompts
     networks:
       - resource-network
     healthcheck:
@@ -46,6 +50,9 @@ services:
 
 volumes:
   resource_db:
+  resource_generated_wrappers:
+  resource_wrapper_logs:
+  resource_prompts:
 
 networks:
   resource-network:

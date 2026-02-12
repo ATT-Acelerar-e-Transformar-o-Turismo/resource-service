@@ -26,63 +26,68 @@ class ProcessWrapperRunner(WrapperRunner):
     def get_monitor(self) -> WrapperMonitor:
         return self._monitor
 
-    async def execute_wrapper(self, wrapper: GeneratedWrapper, skip_historical: bool = False) -> WrapperExecutionResult:
-        """
-        Execute a wrapper in a separate process.
-
-        For continuous wrappers (API sources), this starts the process and returns immediately.
-        For one-time wrappers (CSV/XLSX), this could still use process isolation.
-
-        Args:
-            wrapper: GeneratedWrapper instance with code and metadata
-
-        Returns:
-            WrapperExecutionResult with execution details
-        """
+    async def execute_wrapper(
+        self,
+        wrapper: GeneratedWrapper,
+        skip_historical: bool = False,
+        resume_phase: Optional[str] = None,
+        resume_high_water_mark: Optional[str] = None,
+        resume_low_water_mark: Optional[str] = None,
+    ) -> WrapperExecutionResult:
+        """Execute a wrapper in a separate process."""
         try:
-            skip_msg = " (skipping historical data)" if skip_historical else ""
-            logger.info(f"Starting process execution for wrapper {wrapper.wrapper_id}{skip_msg}")
+            logger.info(f"Starting process execution for wrapper {wrapper.wrapper_id}")
 
-            # Start the wrapper process
             wrapper_file_path = f"/app/generated_wrappers/{wrapper.wrapper_id}.py"
             success = await self.process_manager.start_wrapper_process(
                 wrapper.wrapper_id,
                 wrapper_file_path,
                 wrapper.source_config,
-                skip_historical=skip_historical
+                skip_historical=skip_historical,
+                resume_phase=resume_phase,
+                resume_high_water_mark=resume_high_water_mark,
+                resume_low_water_mark=resume_low_water_mark,
             )
 
             if success:
-                logger.info(f"Successfully started process for wrapper {wrapper.wrapper_id}")
+                logger.info(
+                    f"Successfully started process for wrapper {wrapper.wrapper_id}"
+                )
 
                 # For process execution, we return success immediately after starting
-                execution_mode = "continuous" if wrapper.source_type == SourceType.API else "once"
+                execution_mode = (
+                    "continuous" if wrapper.source_type == SourceType.API else "once"
+                )
 
                 return WrapperExecutionResult(
                     wrapper_id=wrapper.wrapper_id,
                     success=True,
                     message=f"Wrapper process started successfully in {execution_mode} mode",
                     data_points_sent=None,  # Unknown for process-based execution
-                    execution_time=datetime.utcnow()
+                    execution_time=datetime.utcnow(),
                 )
             else:
-                logger.error(f"Failed to start process for wrapper {wrapper.wrapper_id}")
+                logger.error(
+                    f"Failed to start process for wrapper {wrapper.wrapper_id}"
+                )
 
                 return WrapperExecutionResult(
                     wrapper_id=wrapper.wrapper_id,
                     success=False,
                     message="Failed to start wrapper process",
                     data_points_sent=None,
-                    execution_time=datetime.utcnow()
+                    execution_time=datetime.utcnow(),
                 )
 
         except (OSError, ValueError, RuntimeError) as e:
-            logger.error(f"Error executing wrapper {wrapper.wrapper_id} in process: {e}")
+            logger.error(
+                f"Error executing wrapper {wrapper.wrapper_id} in process: {e}"
+            )
 
             return WrapperExecutionResult(
                 wrapper_id=wrapper.wrapper_id,
                 success=False,
                 message=f"Process execution failed: {str(e)}",
                 data_points_sent=None,
-                execution_time=datetime.utcnow()
+                execution_time=datetime.utcnow(),
             )

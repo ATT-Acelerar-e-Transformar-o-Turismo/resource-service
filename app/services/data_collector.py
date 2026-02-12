@@ -1,11 +1,11 @@
 import json
 import aio_pika
 import logging
+from datetime import datetime
 from dependencies.rabbitmq import consumer, rabbitmq_client
-from services.data_service import create_data_segment, get_data_by_resource_id
+from services.data_service import create_data_segment
 from schemas.data_segment import TimePoint
 from config import settings
-from exceptions import ResourceNotFoundException
 from dependencies.database import db
 
 logging.basicConfig(level=logging.INFO)
@@ -25,39 +25,59 @@ async def process_collected_data(message: aio_pika.abc.AbstractIncomingMessage):
                 logger.warning("Invalid message format, discarding message.")
                 return
 
-            # Find resource by wrapper_id
+            # Step 1: Update wrapper checkpoint (always, regardless of resource)
+            timestamps = []
+            for p in points_data:
+                try:
+                    timestamps.append(datetime.fromisoformat(p["x"]))
+                except (ValueError, KeyError):
+                    continue
+
+            set_fields = {"last_data_sent": datetime.utcnow()}
+            phase = data.get("phase")
+            if phase:
+                set_fields["phase"] = phase
+
+            update_ops = {
+                "$set": set_fields,
+                "$inc": {"data_points_count": len(points_data)},
+            }
+            if timestamps:
+                update_ops["$max"] = {"high_water_mark": max(timestamps)}
+                update_ops["$min"] = {"low_water_mark": min(timestamps)}
+
+            await db.generated_wrappers.update_one(
+                {"wrapper_id": wrapper_id},
+                update_ops,
+            )
+
+            # Step 2: Ingest data into resource (only if resource exists)
             resource = await db.resources.find_one(
-                    {"wrapper_id": wrapper_id, "deleted": False}
-                    )
+                {"wrapper_id": wrapper_id, "deleted": False}
+            )
 
             if not resource:
-                raise ResourceNotFoundException(
-                        f"Resource with wrapper_id {wrapper_id} not found"
-                        )
+                logger.debug(
+                    f"No resource linked to wrapper {wrapper_id}, skipping data ingestion"
+                )
+                return
 
             points = [TimePoint(**p) for p in points_data]
-
             if not points:
-                logger.warning("Empty data in message, discarding.")
                 return
 
             data_segment = await create_data_segment(resource["_id"], points)
             if not data_segment:
-                logger.warning(f"Data segment creation failed, discarding message: {data}")
+                logger.warning(f"Data segment creation failed for wrapper {wrapper_id}")
                 return
-            logger.debug(f"Data segment created successfully: {data_segment}")
 
             await rabbitmq_client.publish(
-                    settings.RESOURCE_DATA_QUEUE, json.dumps({
-                        "resource_id": str(resource["_id"]),
-                        "data": points_data
-                        })
-                    )
+                settings.RESOURCE_DATA_QUEUE,
+                json.dumps({"resource_id": str(resource["_id"]), "data": points_data}),
+            )
 
         except json.JSONDecodeError:
             logger.error("Invalid JSON format, discarding message.")
-        except ResourceNotFoundException as e:
-            logger.warning(e)
         except (ValueError, TypeError) as e:
             logger.error(f"Data validation error: {e}")
             await message.nack(requeue=False)

@@ -34,21 +34,22 @@ class ATTWrapper:
         """Convert periodicity to seconds for API sources"""
         return get_interval_from_periodicity(self.periodicity)
     
-    async def fetch_historical_data(self) -> List[Dict[str, Any]]:
+    async def fetch_historical_data(self):
         """
-        Fetch historical data from API with date range parameters
+        Fetch historical data from API with date range parameters.
+        Returns HistoricalFetchResult with water marks for resumability.
 
         *** DO NOT MODIFY THIS METHOD ***
         This method uses the HistoricalDataFetcher utility for optimal batch processing.
         Only customize fetch_date_range() and fetch_external_data() methods.
         """
         print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Starting historical data fetch...")
-        total_points_sent = await self.historical_fetcher.fetch_all_historical_data(
+        result = await self.historical_fetcher.fetch_all_historical_data(
             fetch_date_range_func=self.fetch_date_range,
             send_to_queue_func=self.send_to_queue
         )
-        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Completed historical data fetch - {total_points_sent} data points sent")
-        return []  # Return empty list since data was already sent to queue
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Completed historical data fetch - {result.total_points_sent} data points sent")
+        return result
     
     async def fetch_date_range(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
         """Fetch data for a specific date range"""
@@ -123,7 +124,10 @@ class ATTWrapper:
         await self.continuous_executor.run_continuous(
             run_once_func=self.run_once,
             fetch_historical_func=self.fetch_historical_data if not self.historical_data_fetched else None,
-            source_type=self.source_type
+            fetch_date_range_func=self.fetch_date_range if self.source_type == "API" else None,
+            send_to_queue_func=self.send_to_queue if self.source_type == "API" else None,
+            source_type=self.source_type,
+            on_phase_change=lambda phase: setattr(self.message_sender, 'current_phase', phase),
         )
     
 # Entry point for generated wrapper

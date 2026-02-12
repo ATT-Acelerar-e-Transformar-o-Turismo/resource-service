@@ -54,10 +54,11 @@ JSON RESPONSE HANDLING (analyze DATA SAMPLE structure):
 - Common data keys: 'timestamp'/'time'/'date' for datetime, 'value'/'measurement' for numeric
 - Date-keyed objects: If DATA SAMPLE shows structure like {"January 2011": [...], "February 2011": [...]}, iterate through .items() to get date keys and data arrays
 
-DATE PARAMETERS (analyze DATA SAMPLE):
-- Common formats: startdate/enddate, from/to, date_from/date_to
-- Unless otherwise specified, use all these parameters to guarantee that the data is fetched correctly
-- Example: ?startdate=2025-01-01&enddate=2025-01-31&from=2025-01-01&to=2025-01-31&date_from=2025-01-01&date_to=2025-01-31
+DATE PARAMETERS:
+- Use the available tools to discover which URL query parameters the API supports for date filtering.
+- Try fetching the API URL with common date parameters (e.g. ?from=2025-01-01&to=2025-02-01, ?startDate=..., ?date_from=...) and compare the responses to identify which parameters actually filter the data.
+- Unless you discover the specific parameters, use all common formats to maximize compatibility: ?startdate=2025-01-01&enddate=2025-01-31&from=2025-01-01&to=2025-01-31&date_from=2025-01-01&date_to=2025-01-31
+- If the API does not support date filtering via URL parameters, filter the response data in code using start_date/end_date.
 
 *** DATE FILTERING - CRITICAL ***:
 - When needed, use INCLUSIVE date filtering: start_date <= data_datetime <= end_date
