@@ -261,7 +261,7 @@ class WrapperGenerator:
         self,
         prompt: str,
         auth_config: Dict[str, Any],
-        max_tool_calls: int = 10,
+        max_tool_calls: int = 15,
         max_chars: int = 2500,
         wrapper_id: str = None,
     ) -> str:
@@ -321,6 +321,9 @@ class WrapperGenerator:
                 if tool_calls_used >= max_tool_calls:
                     break
 
+                print(
+                    f"Tool call {tool_calls_used + 1}/{max_tool_calls}: {function_call.name}({dict(function_call.args or {})})"
+                )
                 tool_result = runtime.execute(
                     function_name=function_call.name,
                     args=dict(function_call.args or {}),
@@ -528,8 +531,8 @@ class WrapperGenerator:
                 generated_code = await self._call_model_with_tools(
                     prompt=prompt,
                     auth_config=auth_config,
-                    max_tool_calls=10,
-                    max_chars=8000,
+                    max_tool_calls=15,
+                    max_chars=2500,
                     wrapper_id=wrapper_id,
                 )
             else:

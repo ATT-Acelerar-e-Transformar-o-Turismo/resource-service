@@ -9,7 +9,7 @@ from utils import RateLimitHandler, mask_credentials, HistoricalDataFetcher, Mes
 {{ additional_imports }}
 
 class ATTWrapper:
-    def __init__(self, wrapper_id: str, rabbitmq_url: str = None):
+    def __init__(self, wrapper_id: str, source_config: dict = None, rabbitmq_url: str = None):
         # CRITICAL: wrapper_id is always a STRING (UUID), never an integer
         self.wrapper_id = wrapper_id
         self.rabbitmq_url = rabbitmq_url or os.getenv('AMQP_URL', 'amqp://guest:guest@localhost/')
@@ -17,6 +17,20 @@ class ATTWrapper:
         self.periodicity = "{{ periodicity }}"
         self.rate_limiter = RateLimitHandler()
         self.historical_data_fetched = False
+        self.source_config = source_config or {}
+        
+        # Build auth headers from source_config
+        self.headers = dict(self.source_config.get('custom_headers', {}))
+        auth_type = self.source_config.get('auth_type', 'none')
+        if auth_type == 'api_key' and self.source_config.get('api_key'):
+            header_name = self.source_config.get('api_key_header', 'X-API-Key')
+            self.headers[header_name] = self.source_config['api_key']
+        elif auth_type == 'bearer' and self.source_config.get('bearer_token'):
+            self.headers['Authorization'] = f"Bearer {self.source_config['bearer_token']}"
+        elif auth_type == 'basic' and self.source_config.get('username'):
+            import base64
+            credentials = base64.b64encode(f"{self.source_config['username']}:{self.source_config.get('password', '')}".encode()).decode()
+            self.headers['Authorization'] = f"Basic {credentials}"
         
         # Wrapper metadata
         self.metadata = {
@@ -54,15 +68,13 @@ class ATTWrapper:
     async def fetch_date_range(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
         """Fetch data for a specific date range"""
         # PLACEHOLDER: Implement date range fetching
-        # if not specified, use all these parameters to guarantee that the data is fetched correctly
-        # ?from=2025-01-01&to=2025-01-31&start=2025-01-01&end=2025-01-31&startdate=2025-01-01&enddate=2025-01-31
+        # Use tools to discover which date query parameters the API accepts (e.g. from/to, start/end, startDate/endDate)
+        # Only use the parameters that actually work — do NOT send multiple parameter families simultaneously
         
         print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Fetching historical data from {start_date} to {end_date}...")
         
-        # Example of using the rate limit handler with Response object:
-        # response = requests.get(url, headers=headers, params=params)
-        # 
-        # # Handle rate limiting with complete response object
+        # IMPORTANT: Always use self.headers for authentication in all requests
+        # response = requests.get(url, headers=self.headers, params=params)
         # await self.rate_limiter.handle_rate_limit(response)
         
         ...
@@ -148,7 +160,7 @@ if __name__ == "__main__":
     except json.JSONDecodeError:
         raise ValueError("source_config must be valid JSON")
 
-    wrapper = ATTWrapper(wrapper_id)
+    wrapper = ATTWrapper(wrapper_id, source_config=source_config)
 
     # Check for skip-historical flag (for service restarts)
     if len(sys.argv) > 3 and sys.argv[3] == "--skip-historical":
