@@ -43,6 +43,7 @@ CRITICAL DATETIME CONVERSION:
 - YEAR-ONLY (2004, 2005): pd.to_datetime(df['col'], format='%Y')
 - NEVER use pd.to_datetime() without format parameter for numeric years
 - Convert to ISO 8601: .dt.strftime('%Y-%m-%dT%H:%M:%S')
+- start_date/end_date in fetch_date_range() are naive datetimes — if the API returns timezone-aware timestamps, ensure both sides of any comparison are the same kind (both naive or both aware)
 NON-ENGLISH DATE PARSING FOR APIs:
 - Carefully analyze DATA SAMPLE for date format (especially month names in Portuguese, Spanish, French, etc.)
 - If dates use non-English month names (e.g., "Janeiro de 2011", "Dezembro de 2025"), create a mapping dictionary
