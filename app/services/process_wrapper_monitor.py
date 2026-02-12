@@ -10,6 +10,7 @@ from dependencies.database import db
 
 logger = logging.getLogger(__name__)
 
+
 class ProcessWrapperMonitor(WrapperMonitor):
     """Monitor implementation for process-based wrapper execution"""
 
@@ -31,20 +32,23 @@ class ProcessWrapperMonitor(WrapperMonitor):
             bool: True if monitoring started successfully
         """
         try:
-            success = await self.process_manager.start_wrapper_process(wrapper.wrapper_id)
+            success = await self.process_manager.start_wrapper_process(
+                wrapper.wrapper_id
+            )
 
             if success:
                 logger.info(f"Started monitoring process wrapper {wrapper.wrapper_id}")
                 return True
             else:
-                logger.error(f"Failed to start monitoring process wrapper {wrapper.wrapper_id}")
+                logger.error(
+                    f"Failed to start monitoring process wrapper {wrapper.wrapper_id}"
+                )
                 return False
 
         except (OSError, PermissionError) as e:
-            logger.error(f"System error starting process wrapper monitoring for {wrapper.wrapper_id}: {e}")
-            return False
-        except (ConnectionError, TimeoutError) as e:
-            logger.error(f"Connection error starting process wrapper monitoring for {wrapper.wrapper_id}: {e}")
+            logger.error(
+                f"System error starting process wrapper monitoring for {wrapper.wrapper_id}: {e}"
+            )
             return False
         except ValueError as e:
             logger.error(f"Invalid configuration for wrapper {wrapper.wrapper_id}: {e}")
@@ -84,8 +88,10 @@ class ProcessWrapperMonitor(WrapperMonitor):
                 {"wrapper_id": wrapper_id},
                 {
                     "$set": {"status": "completed"},
-                    "$push": {"execution_log": f"Stopped manually at {datetime.utcnow()}"}
-                }
+                    "$push": {
+                        "execution_log": f"Stopped manually at {datetime.utcnow()}"
+                    },
+                },
             )
 
             logger.info(f"Successfully stopped process wrapper {wrapper_id}")
@@ -101,12 +107,19 @@ class ProcessWrapperMonitor(WrapperMonitor):
                 wrapper_process = self.process_manager.running_processes.get(wrapper_id)
                 if wrapper_process:
                     wrapper_process.process.kill()
-                    logger.warning(f"Force killed process wrapper {wrapper_id} after timeout")
+                    logger.warning(
+                        f"Force killed process wrapper {wrapper_id} after timeout"
+                    )
             except (ProcessLookupError, OSError) as cleanup_error:
-                logger.error(f"Failed to force kill process {wrapper_id}: {cleanup_error}", exc_info=True)
+                logger.error(
+                    f"Failed to force kill process {wrapper_id}: {cleanup_error}",
+                    exc_info=True,
+                )
             return False
         except (ConnectionError, TimeoutError) as e:
-            logger.error(f"Database connection error while stopping wrapper {wrapper_id}: {e}")
+            logger.error(
+                f"Database connection error while stopping wrapper {wrapper_id}: {e}"
+            )
             return False
         except OSError as e:
             logger.error(f"System error stopping process wrapper {wrapper_id}: {e}")
@@ -123,7 +136,9 @@ class ProcessWrapperMonitor(WrapperMonitor):
         """
         try:
             if wrapper_id not in self.process_manager.running_processes:
-                await self._update_crashed_wrapper_status(wrapper_id, "Process not found in running processes")
+                await self._update_crashed_wrapper_status(
+                    wrapper_id, "Process not found in running processes"
+                )
                 return WrapperHealthStatus.CRASHED
 
             wrapper_process = self.process_manager.running_processes[wrapper_id]
@@ -131,7 +146,9 @@ class ProcessWrapperMonitor(WrapperMonitor):
             if wrapper_process.process.poll() is not None:
                 exit_code = wrapper_process.process.poll()
                 await self._append_exit_info_to_logs(wrapper_id, exit_code)
-                await self._update_crashed_wrapper_status(wrapper_id, f"Process terminated with exit code {exit_code}")
+                await self._update_crashed_wrapper_status(
+                    wrapper_id, f"Process terminated with exit code {exit_code}"
+                )
                 await self.process_manager._cleanup_process(wrapper_id)
                 return WrapperHealthStatus.CRASHED
 
@@ -142,7 +159,9 @@ class ProcessWrapperMonitor(WrapperMonitor):
             await self._update_crashed_wrapper_status(wrapper_id, "Process not found")
             return WrapperHealthStatus.CRASHED
         except (ConnectionError, TimeoutError) as e:
-            logger.error(f"Database connection error checking health for {wrapper_id}: {e}")
+            logger.error(
+                f"Database connection error checking health for {wrapper_id}: {e}"
+            )
             return WrapperHealthStatus.UNKNOWN
         except (OSError, ValueError) as e:
             logger.error(f"Error checking health status for wrapper {wrapper_id}: {e}")
@@ -160,7 +179,9 @@ class ProcessWrapperMonitor(WrapperMonitor):
             else:
                 error_message = f"Process crashed: {reason}. No logs available."
 
-            wrapper_doc = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})
+            wrapper_doc = await db.generated_wrappers.find_one(
+                {"wrapper_id": wrapper_id}
+            )
             if wrapper_doc and wrapper_doc.get("status") in ["executing", "generating"]:
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id},
@@ -169,17 +190,21 @@ class ProcessWrapperMonitor(WrapperMonitor):
                             "status": "error",
                             "error_message": error_message,
                             "completed_at": datetime.utcnow(),
-                            "updated_at": datetime.utcnow()
+                            "updated_at": datetime.utcnow(),
                         },
                         "$push": {
                             "execution_log": f"Process crashed at {datetime.utcnow()}: {reason}"
-                        }
-                    }
+                        },
+                    },
                 )
-                logger.info(f"Updated database status for crashed wrapper {wrapper_id}: {reason}")
+                logger.info(
+                    f"Updated database status for crashed wrapper {wrapper_id}: {reason}"
+                )
 
         except (ConnectionError, TimeoutError) as e:
-            logger.error(f"Database connection error updating crashed wrapper {wrapper_id}: {e}")
+            logger.error(
+                f"Database connection error updating crashed wrapper {wrapper_id}: {e}"
+            )
         except ValueError as e:
             logger.error(f"Invalid data updating crashed wrapper {wrapper_id}: {e}")
         except OSError as e:
@@ -193,32 +218,48 @@ class ProcessWrapperMonitor(WrapperMonitor):
             stderr_file = f"/app/wrapper_logs/{wrapper_id}_stderr.log"
             if os.path.exists(stderr_file):
                 try:
-                    with open(stderr_file, 'r') as f:
+                    with open(stderr_file, "r") as f:
                         lines = f.readlines()
                         if lines:
                             last_stderr = lines[-5:]
-                            crash_logs.extend([f"[STDERR] {line.strip()}" for line in last_stderr if line.strip()])
+                            crash_logs.extend(
+                                [
+                                    f"[STDERR] {line.strip()}"
+                                    for line in last_stderr
+                                    if line.strip()
+                                ]
+                            )
                 except IOError:
                     pass
 
             stdout_file = f"/app/wrapper_logs/{wrapper_id}_stdout.log"
             if os.path.exists(stdout_file):
                 try:
-                    with open(stdout_file, 'r') as f:
+                    with open(stdout_file, "r") as f:
                         lines = f.readlines()
                         if lines:
                             last_stdout = lines[-3:]
-                            crash_logs.extend([f"[STDOUT] {line.strip()}" for line in last_stdout if line.strip()])
+                            crash_logs.extend(
+                                [
+                                    f"[STDOUT] {line.strip()}"
+                                    for line in last_stdout
+                                    if line.strip()
+                                ]
+                            )
                 except IOError:
                     pass
 
             return "\n".join(crash_logs) if crash_logs else ""
 
         except (IOError, OSError, PermissionError) as e:
-            logger.error(f"File system error reading crash logs for wrapper {wrapper_id}: {e}")
+            logger.error(
+                f"File system error reading crash logs for wrapper {wrapper_id}: {e}"
+            )
             return ""
         except UnicodeDecodeError as e:
-            logger.error(f"Encoding error reading crash logs for wrapper {wrapper_id}: {e}")
+            logger.error(
+                f"Encoding error reading crash logs for wrapper {wrapper_id}: {e}"
+            )
             return ""
 
     async def get_monitoring_details(self, wrapper_id: str) -> Dict[str, Any]:
@@ -239,25 +280,31 @@ class ProcessWrapperMonitor(WrapperMonitor):
             details = {
                 "process_id": wrapper_process.process.pid,
                 "exit_code": wrapper_process.process.poll(),
-                "uptime_seconds": (datetime.utcnow() - wrapper_process.started_at).total_seconds(),
+                "uptime_seconds": (
+                    datetime.utcnow() - wrapper_process.started_at
+                ).total_seconds(),
                 "started_at": wrapper_process.started_at.isoformat(),
                 "last_health_check": wrapper_process.last_health_check.isoformat(),
                 "log_files": {
                     "stdout": f"/app/wrapper_logs/{wrapper_id}_stdout.log",
-                    "stderr": f"/app/wrapper_logs/{wrapper_id}_stderr.log"
-                }
+                    "stderr": f"/app/wrapper_logs/{wrapper_id}_stderr.log",
+                },
             }
 
             return details
 
         except ProcessLookupError as e:
-            logger.warning(f"Process {wrapper_id} lookup failed in monitoring details: {e}")
+            logger.warning(
+                f"Process {wrapper_id} lookup failed in monitoring details: {e}"
+            )
             return {"status": "process_not_found", "error": str(e)}
         except (AttributeError, ValueError) as e:
             logger.error(f"Invalid process data for wrapper {wrapper_id}: {e}")
             return {"error": str(e)}
         except OSError as e:
-            logger.error(f"System error getting monitoring details for wrapper {wrapper_id}: {e}")
+            logger.error(
+                f"System error getting monitoring details for wrapper {wrapper_id}: {e}"
+            )
             return {"error": str(e)}
 
     async def get_logs(self, wrapper_id: str, limit: int = 100) -> List[str]:
@@ -276,25 +323,39 @@ class ProcessWrapperMonitor(WrapperMonitor):
             stdout_file = f"/app/wrapper_logs/{wrapper_id}_stdout.log"
             if os.path.exists(stdout_file):
                 try:
-                    with open(stdout_file, 'r') as f:
+                    with open(stdout_file, "r") as f:
                         stdout_lines = f.readlines()
-                        logs.extend([f"[STDOUT] {line.strip()}" for line in stdout_lines if line.strip()])
+                        logs.extend(
+                            [
+                                f"[STDOUT] {line.strip()}"
+                                for line in stdout_lines
+                                if line.strip()
+                            ]
+                        )
                 except IOError as e:
                     logger.warning(f"Failed to read stdout log for {wrapper_id}: {e}")
 
             stderr_file = f"/app/wrapper_logs/{wrapper_id}_stderr.log"
             if os.path.exists(stderr_file):
                 try:
-                    with open(stderr_file, 'r') as f:
+                    with open(stderr_file, "r") as f:
                         stderr_lines = f.readlines()
-                        logs.extend([f"[STDERR] {line.strip()}" for line in stderr_lines if line.strip()])
+                        logs.extend(
+                            [
+                                f"[STDERR] {line.strip()}"
+                                for line in stderr_lines
+                                if line.strip()
+                            ]
+                        )
                 except IOError as e:
                     logger.warning(f"Failed to read stderr log for {wrapper_id}: {e}")
 
             return logs[-limit:] if logs else []
 
         except (IOError, OSError, PermissionError) as e:
-            logger.error(f"File system error getting logs for wrapper {wrapper_id}: {e}")
+            logger.error(
+                f"File system error getting logs for wrapper {wrapper_id}: {e}"
+            )
             return [f"Error reading logs: {str(e)}"]
         except UnicodeDecodeError as e:
             logger.error(f"Encoding error reading logs for wrapper {wrapper_id}: {e}")
@@ -313,19 +374,63 @@ class ProcessWrapperMonitor(WrapperMonitor):
             bool: True if wrapper process is running
         """
         try:
-            if wrapper_id not in self.process_manager.running_processes:
-                return False
+            if wrapper_id in self.process_manager.running_processes:
+                wrapper_process = self.process_manager.running_processes[wrapper_id]
+                return wrapper_process.process.poll() is None
 
-            wrapper_process = self.process_manager.running_processes[wrapper_id]
-
-            return wrapper_process.process.poll() is None
+            return False
 
         except ProcessLookupError as e:
-            logger.warning(f"Process {wrapper_id} lookup failed in execution check: {e}")
+            logger.warning(
+                f"Process {wrapper_id} lookup failed in execution check: {e}"
+            )
             return False
         except (AttributeError, ValueError) as e:
-            logger.error(f"Invalid process data checking execution for {wrapper_id}: {e}")
+            logger.error(
+                f"Invalid process data checking execution for {wrapper_id}: {e}"
+            )
             return False
         except OSError as e:
-            logger.error(f"System error checking if wrapper {wrapper_id} is executing: {e}")
+            logger.error(
+                f"System error checking if wrapper {wrapper_id} is executing: {e}"
+            )
+            return False
+        except (AttributeError, ValueError) as e:
+            logger.error(
+                f"Invalid process data checking execution for {wrapper_id}: {e}"
+            )
+            return False
+        except OSError as e:
+            logger.error(
+                f"System error checking if wrapper {wrapper_id} is executing: {e}"
+            )
+            return False
+
+    def _find_wrapper_process_in_os(self, wrapper_id: str) -> bool:
+        """Check if wrapper process exists in OS process list
+
+        This handles cases where service restarted but wrapper processes are still running
+
+        Args:
+            wrapper_id: ID of wrapper to check
+
+        Returns:
+            bool: True if wrapper process found running in OS
+        """
+        try:
+            result = subprocess.run(
+                ["ps", "aux"], capture_output=True, text=True, timeout=5
+            )
+
+            for line in result.stdout.splitlines():
+                if (
+                    f"/app/generated_wrappers/{wrapper_id}.py" in line
+                    and "python" in line
+                ):
+                    return True
+
+            return False
+
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
+            logger.error(f"Error scanning OS processes for wrapper {wrapper_id}: {e}")
             return False
