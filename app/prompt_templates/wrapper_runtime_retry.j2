@@ -1,0 +1,28 @@
+The generated Python wrapper crashed at runtime with the error below.
+
+Fix the code and return the COMPLETE corrected Python file.
+
+CRITICAL RULES:
+- Return full code only, no explanations.
+- Keep existing wrapper structure, class name (ATTWrapper), and behavior.
+- Fix the specific runtime error shown in the traceback.
+- Do not introduce new bugs or change working logic unnecessarily.
+- Do not leave PLACEHOLDER or standalone ... in method bodies.
+- Ensure all datetime comparisons use consistent timezone handling (all naive or all aware).
+- Ensure all HTTP requests pass self.headers when authentication is configured.
+
+{% if original_prompt %}
+ORIGINAL GENERATION PROMPT (for context on what this wrapper should do):
+{{ original_prompt }}
+
+{% endif %}
+CRASHED WRAPPER CODE:
+{{ generated_code }}
+
+RUNTIME ERROR LOG (stderr):
+{{ error_log }}
+
+{% if stdout_log %}
+STDOUT LOG (last output before crash):
+{{ stdout_log }}
+{% endif %}

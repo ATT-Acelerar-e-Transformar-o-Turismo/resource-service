@@ -16,6 +16,7 @@ class WrapperStatus(str, Enum):
     GENERATING = "generating"
     CREATING_RESOURCE = "creating_resource"
     EXECUTING = "executing"
+    RETRYING = "retrying"
     STOPPED = "stopped"
     COMPLETED = "completed"
     ERROR = "error"
@@ -126,6 +127,10 @@ class GeneratedWrapper(BaseModel):
     )
     low_water_mark: Optional[datetime] = Field(
         None, description="Oldest data point timestamp ever sent"
+    )
+
+    retry_count: int = Field(
+        default=0, description="Number of auto-retry attempts after runtime crash"
     )
 
     execution_result: Optional["WrapperExecutionResult"] = None

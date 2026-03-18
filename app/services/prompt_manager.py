@@ -57,6 +57,22 @@ class PromptManager:
             linting_errors=linting_errors,
         )
 
+    def generate_runtime_retry_prompt(
+        self,
+        generated_code: str,
+        error_log: str,
+        original_prompt: str = None,
+        stdout_log: str = None,
+    ) -> str:
+        """Generate retry prompt for wrapper regeneration after runtime crash"""
+        template = self.env.get_template("wrapper_runtime_retry.j2")
+        return template.render(
+            generated_code=generated_code,
+            error_log=error_log,
+            original_prompt=original_prompt,
+            stdout_log=stdout_log,
+        )
+
     def _get_source_specific_instructions(
         self, source_type: str, periodicity: str
     ) -> str:
