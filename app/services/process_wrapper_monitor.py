@@ -182,7 +182,11 @@ class ProcessWrapperMonitor(WrapperMonitor):
             wrapper_doc = await db.generated_wrappers.find_one(
                 {"wrapper_id": wrapper_id}
             )
-            if wrapper_doc and wrapper_doc.get("status") in ["executing", "generating"]:
+            if wrapper_doc and wrapper_doc.get("status") in [
+                "executing",
+                "generating",
+                "retrying",
+            ]:
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id},
                     {

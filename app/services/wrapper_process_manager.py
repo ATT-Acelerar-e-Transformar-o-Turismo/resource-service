@@ -188,19 +188,18 @@ class WrapperProcessManager:
                     # Append exit information to log files (never delete logs!)
                     await self._append_exit_info_to_logs(wrapper_id, exit_code)
 
-                    await db.generated_wrappers.update_one(
-                        {"wrapper_id": wrapper_id},
-                        {
-                            "$set": {
-                                "status": WrapperStatus.COMPLETED
-                                if exit_code == 0
-                                else WrapperStatus.ERROR
+                    if exit_code == 0:
+                        await db.generated_wrappers.update_one(
+                            {"wrapper_id": wrapper_id},
+                            {
+                                "$set": {"status": WrapperStatus.COMPLETED},
+                                "$push": {
+                                    "execution_log": f"Process completed at {datetime.utcnow()} with exit code 0"
+                                },
                             },
-                            "$push": {
-                                "execution_log": f"Process terminated at {datetime.utcnow()} with exit code {exit_code}"
-                            },
-                        },
-                    )
+                        )
+                    else:
+                        await self._handle_crashed_wrapper(wrapper_id, exit_code)
 
                 else:
                     # Process is running, update health check
@@ -214,6 +213,65 @@ class WrapperProcessManager:
         # Clean up dead processes
         for wrapper_id in dead_processes:
             await self._cleanup_process(wrapper_id)
+
+    async def _handle_crashed_wrapper(self, wrapper_id: str, exit_code: int):
+        """Check if a crashed wrapper should be auto-retried or marked as error."""
+        max_retries = 3
+        try:
+            wrapper_doc = await db.generated_wrappers.find_one(
+                {"wrapper_id": wrapper_id}
+            )
+            retry_count = (wrapper_doc or {}).get("retry_count", 0)
+
+            if retry_count < max_retries:
+                logger.info(
+                    f"Wrapper {wrapper_id} crashed (exit {exit_code}), "
+                    f"scheduling auto-retry {retry_count + 1}/{max_retries}"
+                )
+                await db.generated_wrappers.update_one(
+                    {"wrapper_id": wrapper_id},
+                    {
+                        "$set": {"status": "retrying"},
+                        "$push": {
+                            "execution_log": f"Crash at {datetime.utcnow()} (exit {exit_code}), auto-retry scheduled"
+                        },
+                    },
+                )
+
+                # Lazy import to avoid circular dependency
+                from services.wrapper_service import wrapper_service
+
+                asyncio.create_task(wrapper_service.retry_failed_wrapper(wrapper_id))
+            else:
+                logger.warning(
+                    f"Wrapper {wrapper_id} crashed (exit {exit_code}), "
+                    f"retries exhausted ({max_retries}/{max_retries})"
+                )
+                await db.generated_wrappers.update_one(
+                    {"wrapper_id": wrapper_id},
+                    {
+                        "$set": {
+                            "status": WrapperStatus.ERROR,
+                            "error_message": f"Failed after {max_retries} auto-retry attempts (exit code {exit_code})",
+                        },
+                        "$push": {
+                            "execution_log": f"Process terminated at {datetime.utcnow()} with exit code {exit_code}, retries exhausted"
+                        },
+                    },
+                )
+        except (OperationFailure, ConnectionError) as e:
+            logger.error(
+                f"Error handling crashed wrapper {wrapper_id}: {e}", exc_info=True
+            )
+            await db.generated_wrappers.update_one(
+                {"wrapper_id": wrapper_id},
+                {
+                    "$set": {"status": WrapperStatus.ERROR},
+                    "$push": {
+                        "execution_log": f"Process terminated at {datetime.utcnow()} with exit code {exit_code}"
+                    },
+                },
+            )
 
     async def start_wrapper_process(
         self,

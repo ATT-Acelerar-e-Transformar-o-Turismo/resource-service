@@ -738,9 +738,6 @@ class ContinuousExecutor:
                 print(f"Wrapper {self.wrapper_id}: Stopping execution")
                 break
             except (
-                ValueError,
-                KeyError,
-                TypeError,
                 ConnectionError,
                 TimeoutError,
                 OSError,

@@ -324,7 +324,7 @@ class WrapperService:
 
             logger.info(f"Completed wrapper creation {wrapper_id}")
 
-        except (OperationFailure, ConnectionError, TimeoutError) as e:
+        except (OperationFailure, ConnectionError, TimeoutError, OSError) as e:
             logger.error(
                 f"Database/Connection error processing wrapper {wrapper_id}: {e}"
             )
@@ -495,18 +495,232 @@ class WrapperService:
             logger.error(f"Error checking if wrapper {wrapper_id} is executing: {e}")
             return False
 
+    async def retry_failed_wrapper(self, wrapper_id: str) -> bool:
+        """Retry a crashed wrapper by calling Gemini with error context.
+
+        Returns True if retry was dispatched successfully, False otherwise.
+        Max 3 retries per wrapper.
+        """
+        max_retries = 3
+        try:
+            wrapper_doc = await db.generated_wrappers.find_one(
+                {"wrapper_id": wrapper_id}
+            )
+            if not wrapper_doc:
+                logger.error(f"Retry: wrapper {wrapper_id} not found")
+                return False
+
+            wrapper = GeneratedWrapper(**wrapper_doc)
+            current_retry = wrapper.retry_count
+
+            if current_retry >= max_retries:
+                logger.warning(
+                    f"Retry: wrapper {wrapper_id} exhausted {max_retries} retries"
+                )
+                await self._update_wrapper_status(
+                    wrapper_id,
+                    WrapperStatus.ERROR,
+                    error_message=f"Failed after {max_retries} auto-retry attempts",
+                )
+                return False
+
+            await self._update_wrapper_status(wrapper_id, WrapperStatus.RETRYING)
+
+            # Read original prompt from generation trace
+            original_prompt = None
+            trace_path = f"/app/prompts/{wrapper_id}/generation_trace.json"
+            try:
+                with open(trace_path, "r", encoding="utf-8") as f:
+                    trace_data = json.load(f)
+                    original_prompt = trace_data.get("initial_prompt")
+            except (FileNotFoundError, json.JSONDecodeError, IOError) as e:
+                logger.warning(
+                    f"Retry: could not read generation trace for {wrapper_id}: {e}"
+                )
+
+            # Read crashed code
+            wrapper_file_path = f"/app/generated_wrappers/{wrapper_id}.py"
+            try:
+                with open(wrapper_file_path, "r", encoding="utf-8") as f:
+                    generated_code = f.read()
+            except (FileNotFoundError, IOError) as e:
+                logger.error(
+                    f"Retry: could not read wrapper file for {wrapper_id}: {e}"
+                )
+                await self._update_wrapper_status(
+                    wrapper_id,
+                    WrapperStatus.ERROR,
+                    error_message=f"Retry failed: wrapper file not found",
+                )
+                return False
+
+            # Read error logs
+            error_log = ""
+            stderr_path = f"/app/wrapper_logs/{wrapper_id}_stderr.log"
+            try:
+                with open(stderr_path, "r", encoding="utf-8") as f:
+                    error_log = f.read()
+            except (FileNotFoundError, IOError):
+                pass
+
+            stdout_log = ""
+            stdout_path = f"/app/wrapper_logs/{wrapper_id}_stdout.log"
+            try:
+                with open(stdout_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    stdout_log = "".join(lines[-20:]) if lines else ""
+            except (FileNotFoundError, IOError):
+                pass
+
+            # Build retry prompt
+            retry_prompt = self.generator.prompt_manager.generate_runtime_retry_prompt(
+                generated_code=generated_code,
+                error_log=error_log or "No stderr captured",
+                original_prompt=original_prompt,
+                stdout_log=stdout_log or None,
+            )
+
+            # Call Gemini — use tool-calling for API wrappers
+            logger.info(
+                f"Retry {current_retry + 1}/{max_retries}: calling Gemini for wrapper {wrapper_id}"
+            )
+
+            auth_config = {}
+            if wrapper.source_type == SourceType.API:
+                auth_config = self.generator._build_api_auth_config(
+                    wrapper.source_config
+                )
+                fixed_code = await self.generator._call_model_with_tools(
+                    prompt=retry_prompt,
+                    auth_config=auth_config,
+                    max_tool_calls=10,
+                    max_chars=2500,
+                    wrapper_id=wrapper_id,
+                )
+            else:
+                fixed_code = await self.generator._call_model(retry_prompt)
+
+            fixed_code = self.generator._clean_code_response(fixed_code)
+
+            # Lint the fixed code
+            lint_error = self.generator._validate_generated_code(fixed_code)
+            if lint_error:
+                lint_retry_prompt = (
+                    self.generator.prompt_manager.generate_wrapper_lint_retry_prompt(
+                        generated_code=fixed_code,
+                        linting_errors=lint_error,
+                    )
+                )
+                lint_retry_response = await self.generator._call_model(
+                    lint_retry_prompt
+                )
+                fixed_code = self.generator._clean_code_response(lint_retry_response)
+
+                final_lint = self.generator._validate_generated_code(fixed_code)
+                if final_lint:
+                    logger.error(
+                        f"Retry: lint failed after retry for {wrapper_id}: {final_lint}"
+                    )
+                    await self._update_wrapper_status(
+                        wrapper_id,
+                        WrapperStatus.ERROR,
+                        error_message=f"Auto-retry {current_retry + 1} failed: lint errors after fix",
+                    )
+                    await db.generated_wrappers.update_one(
+                        {"wrapper_id": wrapper_id},
+                        {"$set": {"retry_count": current_retry + 1}},
+                    )
+                    return False
+
+            # Save fixed code
+            self.generator.save_wrapper(fixed_code, wrapper_id)
+
+            # Save retry trace
+            self.generator.debug_logger.log_generation_trace(
+                wrapper_id,
+                {
+                    "type": "runtime_retry",
+                    "retry_number": current_retry + 1,
+                    "prompt": retry_prompt,
+                    "fixed_code_length": len(fixed_code),
+                    "error_log_length": len(error_log),
+                },
+            )
+
+            # Update DB: increment retry_count, set status back to executing, store new code
+            await db.generated_wrappers.update_one(
+                {"wrapper_id": wrapper_id},
+                {
+                    "$set": {
+                        "retry_count": current_retry + 1,
+                        "generated_code": fixed_code,
+                        "status": WrapperStatus.EXECUTING.value,
+                        "updated_at": datetime.utcnow(),
+                        "error_message": None,
+                    },
+                    "$push": {
+                        "execution_log": f"Auto-retry {current_retry + 1} at {datetime.utcnow()}"
+                    },
+                },
+            )
+
+            # Restart execution
+            execution_result = await self._runner.execute_wrapper(wrapper)
+
+            if not execution_result.success:
+                logger.error(
+                    f"Retry: failed to restart wrapper {wrapper_id}: {execution_result.message}"
+                )
+                await self._update_wrapper_status(
+                    wrapper_id,
+                    WrapperStatus.ERROR,
+                    error_message=f"Auto-retry {current_retry + 1}: process start failed",
+                )
+                return False
+
+            logger.info(
+                f"Retry {current_retry + 1}/{max_retries}: wrapper {wrapper_id} restarted successfully"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                f"Retry: unexpected error for wrapper {wrapper_id}: {e}",
+                exc_info=True,
+            )
+            await self._update_wrapper_status(
+                wrapper_id,
+                WrapperStatus.ERROR,
+                error_message=f"Auto-retry failed: {str(e)}",
+            )
+            return False
+
     async def restart_executing_wrappers(self):
         """Restart continuous wrappers that were executing before service restart.
 
+        Also re-triggers retries for wrappers stuck in 'retrying' status
+        (the asyncio task was lost when the service restarted).
         Skips wrappers whose processes were already adopted from OS by the process manager.
         """
         try:
+            # Pick up wrappers in 'retrying' that lost their retry task on restart
+            retrying_wrappers = await db.generated_wrappers.find(
+                {"status": "retrying"}
+            ).to_list(length=None)
+            for wrapper_doc in retrying_wrappers:
+                wid = wrapper_doc.get("wrapper_id", "unknown")
+                logger.info(f"Re-scheduling interrupted retry for wrapper {wid}")
+                asyncio.create_task(self.retry_failed_wrapper(wid))
+
             executing_wrappers = await db.generated_wrappers.find(
                 {"status": "executing"}
             ).to_list(length=None)
 
+            if not executing_wrappers and not retrying_wrappers:
+                logger.info("No executing/retrying wrappers found to restart")
+                return
+
             if not executing_wrappers:
-                logger.info("No executing wrappers found to restart")
                 return
 
             restarted_count = 0
