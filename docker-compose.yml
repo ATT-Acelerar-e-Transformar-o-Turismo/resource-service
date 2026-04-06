@@ -1,6 +1,8 @@
 services:
   resource-service:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: resource-service
     restart: always
     environment:
