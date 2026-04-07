@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List
+from auth import require_admin
 from bson.errors import InvalidId
 from schemas.common import PyObjectId
 from services.resource_service import (
@@ -49,7 +50,7 @@ async def get_resource(resource_id: str):
 
 
 @router.post("/", response_model=Resource)
-async def create_resource_route(resource: ResourceCreate):
+async def create_resource_route(resource: ResourceCreate, _=Depends(require_admin)):
     created_resource = await create_resource(resource)
     if not created_resource:
         raise HTTPException(status_code=400, detail="Failed to create resource")
@@ -57,7 +58,7 @@ async def create_resource_route(resource: ResourceCreate):
 
 
 @router.put("/{resource_id}", response_model=Resource)
-async def update_resource_route(resource_id: str, resource: ResourceUpdate):
+async def update_resource_route(resource_id: str, resource: ResourceUpdate, _=Depends(require_admin)):
     try:
         PyObjectId(resource_id)
     except (InvalidId, ValueError):
@@ -69,7 +70,7 @@ async def update_resource_route(resource_id: str, resource: ResourceUpdate):
 
 
 @router.patch("/{resource_id}", response_model=Resource)
-async def patch_resource_route(resource_id: str, resource: ResourcePatch):
+async def patch_resource_route(resource_id: str, resource: ResourcePatch, _=Depends(require_admin)):
     try:
         PyObjectId(resource_id)
     except (InvalidId, ValueError):
@@ -83,7 +84,7 @@ async def patch_resource_route(resource_id: str, resource: ResourcePatch):
 
 
 @router.delete("/{resource_id}", response_model=ResourceDelete)
-async def delete_resource_route(resource_id: str):
+async def delete_resource_route(resource_id: str, _=Depends(require_admin)):
     try:
         PyObjectId(resource_id)
     except (InvalidId, ValueError):

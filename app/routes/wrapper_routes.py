@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from auth import require_admin
 from services.wrapper_service import wrapper_service
 from services.file_service import file_service
 from schemas.wrapper import (
@@ -17,7 +18,7 @@ router = APIRouter()
 
 
 @router.post("/generate", response_model=GeneratedWrapper)
-async def generate_wrapper(request: WrapperGenerationRequest) -> GeneratedWrapper:
+async def generate_wrapper(request: WrapperGenerationRequest, _=Depends(require_admin)) -> GeneratedWrapper:
     """Generate a new AI-powered wrapper for sustainability indicators"""
     try:
         # Compute location from file_id for CSV/XLSX sources
@@ -51,7 +52,7 @@ async def generate_wrapper(request: WrapperGenerationRequest) -> GeneratedWrappe
 
 @router.post("/{wrapper_id}/execute", response_model=WrapperExecutionResult)
 async def execute_wrapper(
-    wrapper_id: str, background_tasks: BackgroundTasks
+    wrapper_id: str, background_tasks: BackgroundTasks, _=Depends(require_admin)
 ) -> WrapperExecutionResult:
     """Execute a generated wrapper to fetch and send data"""
     try:
@@ -88,7 +89,7 @@ async def list_wrappers(skip: int = 0, limit: int = 10) -> List[GeneratedWrapper
 
 
 @router.post("/{wrapper_id}/stop")
-async def stop_wrapper(wrapper_id: str) -> dict:
+async def stop_wrapper(wrapper_id: str, _=Depends(require_admin)) -> dict:
     """Stop a running wrapper (universal endpoint)"""
     try:
         success = await wrapper_service.stop_wrapper_execution(wrapper_id)
