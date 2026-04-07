@@ -10,6 +10,8 @@ services:
       - ORIGINS=${ORIGINS:-localhost}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-1.5-flash}
+      - RABBITMQ_URL=amqp://user:password@services-mq:5672/
+      - DATA_RABBITMQ_URL=amqp://user:password@data-mq:5672/
     depends_on:
       - resource-mongo
     volumes:
@@ -18,6 +20,7 @@ services:
       - resource_prompts:/app/prompts
     networks:
       - resource-network
+      - mq-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
@@ -59,3 +62,4 @@ volumes:
 networks:
   resource-network:
     name: resource-network
+  mq-network: {}
