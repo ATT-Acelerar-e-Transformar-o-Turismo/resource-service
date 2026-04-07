@@ -2,13 +2,14 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from services.file_service import file_service
 from schemas.file_upload import FileUploadResponse
+from auth import require_admin
 import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.post("/upload", response_model=FileUploadResponse)
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), _=Depends(require_admin)):
     """
     Upload a CSV or XLSX file for wrapper generation
     
@@ -60,7 +61,7 @@ async def get_file_info(file_id: str):
     )
 
 @router.delete("/{file_id}")
-async def delete_file(file_id: str):
+async def delete_file(file_id: str, _=Depends(require_admin)):
     """Delete an uploaded file"""
     success = await file_service.delete_uploaded_file(file_id)
     
