@@ -706,13 +706,15 @@ class WrapperService:
             # Fail wrappers orphaned mid-generation by a service restart.
             # Their consumer task was killed — requeueing isn't safe because
             # partial state (resource row, file) already exists.
+            error_timestamp = datetime.utcnow()
             orphaned = await db.generated_wrappers.update_many(
-                {"status": {"$in": ["pending", "generating"]}},
+                {"status": WrapperStatus.GENERATING.value},
                 {
                     "$set": {
                         "status": WrapperStatus.ERROR.value,
                         "error_message": "Wrapper generation interrupted by service restart",
-                        "updated_at": datetime.utcnow(),
+                        "updated_at": error_timestamp,
+                        "completed_at": error_timestamp,
                     }
                 },
             )
