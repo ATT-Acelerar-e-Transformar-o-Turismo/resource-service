@@ -36,6 +36,25 @@ def _get_signing_key(jwks, token):
     raise JWTError("No matching key found")
 
 
+async def require_auth(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    token = credentials.credentials
+    try:
+        jwks = await _get_jwks()
+        key = _get_signing_key(jwks, token)
+        payload = jwt.decode(
+            token, key, algorithms=ALGORITHMS, options={"verify_aud": False}
+        )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return payload
+
+
 async def require_admin(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
