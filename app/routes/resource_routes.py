@@ -1,8 +1,10 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
-from typing import List
+from typing import List, Any
 from auth import require_admin, require_auth
 from bson.errors import InvalidId
+from bson.objectid import ObjectId
 from schemas.common import PyObjectId
+from pydantic import BaseModel
 from services.resource_service import (
     get_all_resources,
     get_resource_by_id,
@@ -18,6 +20,11 @@ from schemas.resource import (
     ResourcePatch,
     ResourceDelete,
 )
+
+
+class ResourceDataResponse(BaseModel):
+    resource_id: str
+    data: List[Any]
 
 router = APIRouter()
 
@@ -84,21 +91,22 @@ async def patch_resource_route(resource_id: str, resource: ResourcePatch, _=Depe
     return updated_resource
 
 
-@router.get("/{resource_id}/data")
+@router.get("/{resource_id}/data", response_model=ResourceDataResponse)
 async def get_resource_data(resource_id: str, limit: int = Query(500, ge=1, le=5000), _=Depends(require_auth)):
     try:
-        oid = PyObjectId(resource_id)
+        oid = ObjectId(resource_id)
     except (InvalidId, ValueError):
         raise HTTPException(status_code=400, detail=INVALID_RESOURCE_ID)
     resource = await get_resource_by_id(resource_id)
     if not resource:
         raise HTTPException(status_code=404, detail=RESOURCE_NOT_FOUND)
     points = []
-    async for chunk in get_data_by_resource_id(oid, sorted=True):
-        points.extend(chunk["data"])
+    async for chunk in get_data_by_resource_id(oid, sorted=True, chunk_size=limit):
+        remaining = limit - len(points)
+        points.extend(chunk["data"][:remaining])
         if len(points) >= limit:
             break
-    return {"resource_id": resource_id, "data": points[:limit]}
+    return ResourceDataResponse(resource_id=resource_id, data=points)
 
 
 @router.delete("/{resource_id}", response_model=ResourceDelete)
