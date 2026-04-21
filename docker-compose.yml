@@ -9,7 +9,7 @@ services:
       - MONGO_URI=mongodb://resource-mongo:27017/resources
       - ORIGINS=${ORIGINS:-localhost}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-1.5-flash}
+      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-flash-latest}
       - RABBITMQ_URL=amqp://user:password@services-mq:5672/
       - DATA_RABBITMQ_URL=amqp://user:password@data-mq:5672/
     depends_on:

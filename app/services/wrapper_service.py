@@ -703,6 +703,26 @@ class WrapperService:
         Skips wrappers whose processes were already adopted from OS by the process manager.
         """
         try:
+            # Fail wrappers orphaned mid-generation by a service restart.
+            # Their consumer task was killed — requeueing isn't safe because
+            # partial state (resource row, file) already exists.
+            error_timestamp = datetime.utcnow()
+            orphaned = await db.generated_wrappers.update_many(
+                {"status": WrapperStatus.GENERATING.value},
+                {
+                    "$set": {
+                        "status": WrapperStatus.ERROR.value,
+                        "error_message": "Wrapper generation interrupted by service restart",
+                        "updated_at": error_timestamp,
+                        "completed_at": error_timestamp,
+                    }
+                },
+            )
+            if orphaned.modified_count:
+                logger.info(
+                    f"Marked {orphaned.modified_count} orphaned wrapper(s) as ERROR after restart"
+                )
+
             # Pick up wrappers in 'retrying' that lost their retry task on restart
             retrying_wrappers = await db.generated_wrappers.find(
                 {"status": "retrying"}
