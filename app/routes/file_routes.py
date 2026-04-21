@@ -2,7 +2,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from services.file_service import file_service
 from schemas.file_upload import FileUploadResponse
-from auth import require_admin
+from auth import require_admin, require_auth
 import logging
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ async def upload_file(file: UploadFile = File(...), _=Depends(require_admin)):
         raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
 
 @router.get("/{file_id}")
-async def get_file_info(file_id: str):
+async def get_file_info(file_id: str, _=Depends(require_auth)):
     """Get information about an uploaded file"""
     uploaded_file = await file_service.get_uploaded_file(file_id)
     
@@ -71,7 +71,7 @@ async def delete_file(file_id: str, _=Depends(require_admin)):
     return {"message": "File deleted successfully"}
 
 @router.get("/")
-async def list_files():
+async def list_files(_=Depends(require_auth)):
     """List all uploaded files (for debugging)"""
     # This could be enhanced with pagination, filtering, etc.
     try:

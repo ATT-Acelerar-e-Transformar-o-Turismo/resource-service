@@ -36,22 +36,35 @@ def _get_signing_key(jwks, token):
     raise JWTError("No matching key found")
 
 
-async def require_admin(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-):
+async def _decode_token(credentials: HTTPAuthorizationCredentials) -> dict:
     token = credentials.credentials
     try:
         jwks = await _get_jwks()
         key = _get_signing_key(jwks, token)
-        payload = jwt.decode(
-            token, key, algorithms=ALGORITHMS, options={"verify_aud": False}
-        )
+        return jwt.decode(token, key, algorithms=ALGORITHMS, options={"verify_aud": False})
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable",
+        )
+
+
+async def require_auth(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    return await _decode_token(credentials)
+
+
+async def require_admin(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    payload = await _decode_token(credentials)
     roles = payload.get("realm_access", {}).get("roles", [])
     if "admin" not in roles:
         raise HTTPException(

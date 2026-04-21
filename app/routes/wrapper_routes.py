@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
-from auth import require_admin
+from auth import require_admin, require_auth
 from services.wrapper_service import wrapper_service
 from services.file_service import file_service
 from schemas.wrapper import (
@@ -69,7 +69,7 @@ async def execute_wrapper(
 
 
 @router.get("/{wrapper_id}", response_model=GeneratedWrapper)
-async def get_wrapper(wrapper_id: str) -> GeneratedWrapper:
+async def get_wrapper(wrapper_id: str, _=Depends(require_auth)) -> GeneratedWrapper:
     """Get wrapper details by ID"""
     wrapper = await wrapper_service.get_wrapper(wrapper_id)
     if not wrapper:
@@ -79,7 +79,7 @@ async def get_wrapper(wrapper_id: str) -> GeneratedWrapper:
 
 
 @router.get("/", response_model=List[GeneratedWrapper])
-async def list_wrappers(skip: int = 0, limit: int = 10) -> List[GeneratedWrapper]:
+async def list_wrappers(skip: int = 0, limit: int = 10, _=Depends(require_auth)) -> List[GeneratedWrapper]:
     """List all generated wrappers"""
     try:
         return await wrapper_service.list_wrappers(skip, limit)
@@ -108,7 +108,7 @@ async def stop_wrapper(wrapper_id: str, _=Depends(require_admin)) -> dict:
 
 
 @router.get("/{wrapper_id}/health")
-async def get_wrapper_health(wrapper_id: str) -> dict:
+async def get_wrapper_health(wrapper_id: str, _=Depends(require_auth)) -> dict:
     """Get wrapper health status (universal endpoint)"""
     try:
         health_status = await wrapper_service.get_wrapper_health_status(wrapper_id)
@@ -127,7 +127,7 @@ async def get_wrapper_health(wrapper_id: str) -> dict:
 
 
 @router.get("/{wrapper_id}/logs")
-async def get_wrapper_logs(wrapper_id: str, limit: int = 200) -> dict:
+async def get_wrapper_logs(wrapper_id: str, limit: int = 200, _=Depends(require_auth)) -> dict:
     """Get wrapper logs from log files (universal endpoint)"""
     try:
         logs = await wrapper_service.get_wrapper_logs(wrapper_id, limit)
@@ -140,7 +140,7 @@ async def get_wrapper_logs(wrapper_id: str, limit: int = 200) -> dict:
 
 
 @router.get("/{wrapper_id}/monitoring")
-async def get_wrapper_monitoring_details(wrapper_id: str) -> dict:
+async def get_wrapper_monitoring_details(wrapper_id: str, _=Depends(require_auth)) -> dict:
     """Get type-specific monitoring details (universal endpoint with flexible response)"""
     try:
         monitoring_details = await wrapper_service.get_wrapper_monitoring_details(
