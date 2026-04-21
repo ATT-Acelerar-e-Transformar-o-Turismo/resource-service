@@ -250,11 +250,21 @@ class WrapperGenerator:
 
         return None
 
+    _GEMINI_CALL_TIMEOUT_S = 300
+
     async def _call_model(self, prompt: str) -> str:
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-        )
+        try:
+            response = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                ),
+                timeout=self._GEMINI_CALL_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ValueError(
+                f"Gemini call timed out after {self._GEMINI_CALL_TIMEOUT_S}s"
+            ) from exc
         return (response.text or "").strip()
 
     async def _call_model_with_tools(
