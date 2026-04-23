@@ -54,6 +54,9 @@ class RabbitMQClient:
                 async for message in queue_iter:
                     try:
                         await handler(message)
+                    except asyncio.CancelledError:
+                        # Propagate cancellation so task shutdown works.
+                        raise
                     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
                         logger.error(f"Data error processing message in queue '{queue_name}': {e}", exc_info=True)
                     except (ConnectionError, TimeoutError, OSError) as e:

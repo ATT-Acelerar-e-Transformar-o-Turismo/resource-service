@@ -242,6 +242,8 @@ class WrapperProcessManager:
                                         "error_message": (
                                             f"Execution timeout after {self._execution_timeout}s"
                                         ),
+                                        "updated_at": now,
+                                        "completed_at": now,
                                     },
                                     "$push": {
                                         "execution_log": (
@@ -252,6 +254,10 @@ class WrapperProcessManager:
                             )
                             dead_processes.append(wrapper_id)
 
+            except asyncio.CancelledError:
+                # Preserve cancellation semantics so the monitoring task
+                # stops cleanly on shutdown.
+                raise
             except Exception as e:
                 # Never let a single wrapper's health check failure break
                 # the monitor or skip remaining wrappers.

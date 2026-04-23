@@ -340,6 +340,12 @@ class WrapperService:
                 wrapper_id, WrapperStatus.ERROR, error_message=str(e)
             )
             raise
+        except asyncio.CancelledError:
+            # Service shutdown / task cancellation: don't rewrite wrapper
+            # status as ERROR; the work was intentionally aborted. The boot
+            # routine `restart_executing_wrappers` will re-pick-up anything
+            # left mid-flight on the next start.
+            raise
         except Exception as e:
             # Any unforeseen failure (Gemini 5xx, google.genai.errors, etc.)
             # must flip the wrapper to ERROR so the UI can surface it and the
@@ -424,12 +430,28 @@ class WrapperService:
                 "$set": {
                     "status": WrapperStatus.PENDING.value,
                     "updated_at": datetime.utcnow(),
+                    # Counters need an explicit 0 so the auto-retry logic
+                    # starts fresh; $unset would leave the fields missing
+                    # which the schema treats the same as 0 but is noisier
+                    # to read.
+                    "retry_count": 0,
+                    "data_points_count": 0,
                 },
                 "$unset": {
                     "generated_code": "",
                     "error_message": "",
                     "completed_at": "",
                     "last_data_sent": "",
+                    # Clear any lingering state from the previous run so
+                    # monitoring, retry bookkeeping, and resumable-execution
+                    # water marks all start clean.
+                    "execution_result": "",
+                    "execution_log": "",
+                    "phase": "",
+                    "high_water_mark": "",
+                    "low_water_mark": "",
+                    "monitoring_details": "",
+                    "last_health_check": "",
                 },
             },
         )
