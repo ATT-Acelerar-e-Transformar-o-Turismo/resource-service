@@ -33,6 +33,17 @@ class Settings(BaseSettings):
         default=False, env="WRAPPER_GENERATION_DEBUG_MODE"
     )
 
+    # Max concurrent wrapper subprocesses. Each uses ~20MB; the ceiling
+    # prevents a burst from OOM-killing the service.
+    MAX_CONCURRENT_WRAPPERS: int = Field(
+        default=100, env="MAX_CONCURRENT_WRAPPERS"
+    )
+
+    # Hard timeout for a single wrapper subprocess (seconds). 0 = disabled.
+    WRAPPER_EXECUTION_TIMEOUT_SECONDS: int = Field(
+        default=3600, env="WRAPPER_EXECUTION_TIMEOUT_SECONDS"
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

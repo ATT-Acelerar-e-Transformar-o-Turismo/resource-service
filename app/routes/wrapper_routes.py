@@ -88,6 +88,18 @@ async def list_wrappers(skip: int = 0, limit: int = 10, _=Depends(require_auth))
         raise HTTPException(status_code=503, detail="Database service unavailable")
 
 
+@router.post("/{wrapper_id}/regenerate", response_model=GeneratedWrapper)
+async def regenerate_wrapper(wrapper_id: str, _=Depends(require_admin)) -> GeneratedWrapper:
+    """Reset a wrapper and re-queue it for generation."""
+    try:
+        return await wrapper_service.regenerate_wrapper(wrapper_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ConnectionError, TimeoutError) as e:
+        logger.error(f"Connection error regenerating wrapper {wrapper_id}: {e}")
+        raise HTTPException(status_code=503, detail="Service unavailable")
+
+
 @router.post("/{wrapper_id}/stop")
 async def stop_wrapper(wrapper_id: str, _=Depends(require_admin)) -> dict:
     """Stop a running wrapper (universal endpoint)"""

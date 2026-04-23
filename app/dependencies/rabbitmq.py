@@ -43,7 +43,7 @@ class RabbitMQClient:
             raise ValueError(f"Consumer for queue '{queue_name}' already registered.")
         self.consumers[queue_name] = handler
 
-    async def _consume(self, queue_name: str, handler: Callable[[aio_pika.abc.AbstractIncomingMessage], Awaitable[None]]):
+    async def _consume_once(self, queue_name: str, handler: Callable[[aio_pika.abc.AbstractIncomingMessage], Awaitable[None]]):
         if self.channel_pool is None:
             raise RuntimeError("Channel pool not initialized. Please use .connect() before start consuming")
         channel = await self.channel_pool.get()
@@ -56,15 +56,29 @@ class RabbitMQClient:
                         await handler(message)
                     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
                         logger.error(f"Data error processing message in queue '{queue_name}': {e}", exc_info=True)
-                        await message.reject(requeue=False)
                     except (ConnectionError, TimeoutError, OSError) as e:
                         logger.error(f"Connection error processing message in queue '{queue_name}': {e}", exc_info=True)
-                        await message.reject(requeue=True)
-        except (AMQPConnectionError, AMQPChannelError) as e:
-            logger.error(f"Consumer for queue '{queue_name}' failed: {e}")
-            raise
+                    except Exception as e:
+                        logger.error(f"Unhandled error processing message in queue '{queue_name}': {e}", exc_info=True)
         finally:
             await self.channel_pool.put(channel)
+
+    async def _consume(self, queue_name: str, handler: Callable[[aio_pika.abc.AbstractIncomingMessage], Awaitable[None]]):
+        backoff = 1.0
+        max_backoff = 60.0
+        while True:
+            try:
+                await self._consume_once(queue_name, handler)
+                logger.warning(f"Consumer for queue '{queue_name}' exited cleanly; restarting")
+                backoff = 1.0
+            except asyncio.CancelledError:
+                raise
+            except (AMQPConnectionError, AMQPChannelError) as e:
+                logger.error(f"Consumer for queue '{queue_name}' lost connection: {e}; reconnecting in {backoff:.1f}s")
+            except Exception as e:
+                logger.error(f"Consumer for queue '{queue_name}' crashed: {e}; restarting in {backoff:.1f}s", exc_info=True)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
 
     async def start_consumers(self):
         logger.info(f"Starting {len(self.consumers)} consumers: {list(self.consumers.keys())}")

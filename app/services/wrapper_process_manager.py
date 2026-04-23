@@ -23,6 +23,9 @@ class WrapperProcess:
         self.temp_file_path = temp_file_path
         self.started_at = datetime.utcnow()
         self.last_health_check = datetime.utcnow()
+        # Whether this wrapper is holding a concurrency slot from the manager's
+        # semaphore. Set after a successful acquire in start_wrapper_process.
+        self.holds_slot = False
 
 
 class _AdoptedProcess:
@@ -58,6 +61,13 @@ class WrapperProcessManager:
     def __init__(self):
         self.running_processes: Dict[str, WrapperProcess] = {}
         self.monitoring_task: Optional[asyncio.Task] = None
+        # Cap concurrent subprocesses to protect the service from OOM
+        # when many wrappers are created at once.
+        max_concurrent = max(1, int(settings.MAX_CONCURRENT_WRAPPERS))
+        self._start_semaphore = asyncio.Semaphore(max_concurrent)
+        self._max_concurrent = max_concurrent
+        timeout_cfg = int(settings.WRAPPER_EXECUTION_TIMEOUT_SECONDS)
+        self._execution_timeout = timeout_cfg if timeout_cfg > 0 else None
 
     async def start_monitoring(self):
         """Start background monitoring of wrapper processes"""
@@ -100,6 +110,9 @@ class WrapperProcessManager:
                     wrapper_file = f"{WRAPPER_DIR}/{wrapper_id}.py"
                     process = _AdoptedProcess(pid)
                     wp = WrapperProcess(wrapper_id, process, wrapper_file)
+                    # Adopted processes already exist; they don't consume a
+                    # new-spawn slot. holds_slot stays False so cleanup won't
+                    # release an uncounted slot.
                     self.running_processes[wrapper_id] = wp
                     adopted += 1
                     logger.info(
@@ -132,7 +145,9 @@ class WrapperProcessManager:
                 await self._check_process_health()
             except asyncio.CancelledError:
                 break
-            except (OSError, OperationFailure) as e:
+            except Exception as e:
+                # Catch-all so the monitor survives any unexpected error
+                # (e.g. transient DB / rabbit / filesystem issues).
                 logger.error(f"Error in process monitoring: {e}", exc_info=True)
 
     async def _append_exit_info_to_logs(self, wrapper_id: str, exit_code: int):
@@ -173,7 +188,8 @@ class WrapperProcessManager:
         """Check health of all running processes"""
         dead_processes = []
 
-        for wrapper_id, wrapper_process in self.running_processes.items():
+        # Snapshot to tolerate concurrent mutation of running_processes.
+        for wrapper_id, wrapper_process in list(self.running_processes.items()):
             try:
                 # Check if process is still running
                 exit_code = wrapper_process.process.poll()
@@ -202,10 +218,43 @@ class WrapperProcessManager:
                         await self._handle_crashed_wrapper(wrapper_id, exit_code)
 
                 else:
-                    # Process is running, update health check
-                    wrapper_process.last_health_check = datetime.utcnow()
+                    # Process is running. Enforce execution timeout if set.
+                    now = datetime.utcnow()
+                    wrapper_process.last_health_check = now
+                    if self._execution_timeout is not None:
+                        runtime = (now - wrapper_process.started_at).total_seconds()
+                        if runtime > self._execution_timeout:
+                            logger.warning(
+                                f"Wrapper {wrapper_id} exceeded execution timeout "
+                                f"({runtime:.0f}s > {self._execution_timeout}s); terminating"
+                            )
+                            try:
+                                wrapper_process.process.terminate()
+                            except (OSError, ProcessLookupError) as e:
+                                logger.warning(
+                                    f"Terminate failed for wrapper {wrapper_id}: {e}"
+                                )
+                            await db.generated_wrappers.update_one(
+                                {"wrapper_id": wrapper_id},
+                                {
+                                    "$set": {
+                                        "status": WrapperStatus.ERROR.value,
+                                        "error_message": (
+                                            f"Execution timeout after {self._execution_timeout}s"
+                                        ),
+                                    },
+                                    "$push": {
+                                        "execution_log": (
+                                            f"Terminated at {now} due to execution timeout"
+                                        )
+                                    },
+                                },
+                            )
+                            dead_processes.append(wrapper_id)
 
-            except (OSError, OperationFailure) as e:
+            except Exception as e:
+                # Never let a single wrapper's health check failure break
+                # the monitor or skip remaining wrappers.
                 logger.error(
                     f"Health check failed for wrapper {wrapper_id}: {e}", exc_info=True
                 )
@@ -290,6 +339,7 @@ class WrapperProcessManager:
             resume_high_water_mark: ISO timestamp of newest data point ever sent
             resume_low_water_mark: ISO timestamp of oldest data point ever sent
         """
+        slot_acquired = False
         try:
             if wrapper_id in self.running_processes:
                 logger.warning(f"Wrapper {wrapper_id} is already running")
@@ -298,6 +348,16 @@ class WrapperProcessManager:
             if not os.path.exists(wrapper_file_path):
                 logger.error(f"Wrapper file not found: {wrapper_file_path}")
                 return False
+
+            # Reserve a concurrency slot before spawning. Callers await this
+            # naturally when the service is at capacity, providing backpressure.
+            if self._start_semaphore.locked():
+                logger.info(
+                    f"Wrapper {wrapper_id} waiting for a concurrency slot "
+                    f"(cap={self._max_concurrent})"
+                )
+            await self._start_semaphore.acquire()
+            slot_acquired = True
 
             env = os.environ.copy()
             env["DATA_RABBITMQ_URL"] = settings.DATA_RABBITMQ_URL
@@ -338,7 +398,11 @@ class WrapperProcessManager:
 
             # Store process info
             wrapper_process = WrapperProcess(wrapper_id, process, wrapper_file_path)
+            wrapper_process.holds_slot = True
             self.running_processes[wrapper_id] = wrapper_process
+            # Slot ownership transferred to wrapper_process; do not release
+            # in the except/finally path.
+            slot_acquired = False
 
             # Update database status
             await db.generated_wrappers.update_one(
@@ -359,6 +423,11 @@ class WrapperProcessManager:
                 f"Failed to start wrapper process {wrapper_id}: {e}", exc_info=True
             )
             return False
+        finally:
+            # If we acquired a slot but never attached it to a running
+            # process, release it to avoid leaking capacity.
+            if slot_acquired:
+                self._start_semaphore.release()
 
     async def _cleanup_process(self, wrapper_id: str):
         """Properly clean up process resources"""
@@ -400,6 +469,11 @@ class WrapperProcessManager:
             )
             if wrapper_id in self.running_processes:
                 del self.running_processes[wrapper_id]
+        finally:
+            # Always give the concurrency slot back, even if cleanup failed.
+            if wrapper_process.holds_slot:
+                wrapper_process.holds_slot = False
+                self._start_semaphore.release()
 
     async def stop_wrapper_process(self, wrapper_id: str) -> bool:
         """Stop a running wrapper process by wrapper ID."""
