@@ -340,6 +340,26 @@ class WrapperService:
                 wrapper_id, WrapperStatus.ERROR, error_message=str(e)
             )
             raise
+        except asyncio.CancelledError:
+            # Service shutdown / task cancellation: don't rewrite wrapper
+            # status as ERROR; the work was intentionally aborted. The boot
+            # routine `restart_executing_wrappers` will re-pick-up anything
+            # left mid-flight on the next start.
+            raise
+        except Exception as e:
+            # Any unforeseen failure (Gemini 5xx, google.genai.errors, etc.)
+            # must flip the wrapper to ERROR so the UI can surface it and the
+            # user isn't stuck watching "generating" forever.
+            logger.error(
+                f"Unexpected error processing wrapper {wrapper_id}: {e}",
+                exc_info=True,
+            )
+            await self._update_wrapper_status(
+                wrapper_id,
+                WrapperStatus.ERROR,
+                error_message=f"{type(e).__name__}: {e}",
+            )
+            raise
 
     async def _update_wrapper_status(
         self,
@@ -366,6 +386,83 @@ class WrapperService:
         except (OperationFailure, ConnectionError) as e:
             logger.error(f"Database error updating wrapper status: {e}")
             raise
+
+    async def regenerate_wrapper(self, wrapper_id: str) -> GeneratedWrapper:
+        """Reset a wrapper and re-queue it for generation.
+
+        Stops any running execution, clears previously collected resource
+        data, resets status/fields on the wrapper document, and publishes
+        a fresh message to the creation queue.
+        """
+        wrapper_doc = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})
+        if not wrapper_doc:
+            raise ValueError(f"Wrapper {wrapper_id} not found")
+
+        try:
+            monitor = self._runner.get_monitor()
+            await monitor.stop_wrapper(wrapper_id)
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
+
+        resource_id = wrapper_doc.get("resource_id")
+        if resource_id:
+            try:
+                await db.resources_data.delete_many(
+                    {"resource_id": ObjectId(resource_id)}
+                )
+            except (OperationFailure, ConnectionError) as e:
+                logger.warning(
+                    f"Could not clear resource data for {resource_id}: {e}"
+                )
+            try:
+                await db.resources.update_one(
+                    {"_id": ObjectId(resource_id)},
+                    {"$unset": {"startPeriod": "", "endPeriod": ""}},
+                )
+            except (OperationFailure, ConnectionError) as e:
+                logger.warning(
+                    f"Could not reset resource periods for {resource_id}: {e}"
+                )
+
+        await db.generated_wrappers.update_one(
+            {"wrapper_id": wrapper_id},
+            {
+                "$set": {
+                    "status": WrapperStatus.PENDING.value,
+                    "updated_at": datetime.utcnow(),
+                    # Counters need an explicit 0 so the auto-retry logic
+                    # starts fresh; $unset would leave the fields missing
+                    # which the schema treats the same as 0 but is noisier
+                    # to read.
+                    "retry_count": 0,
+                    "data_points_count": 0,
+                },
+                "$unset": {
+                    "generated_code": "",
+                    "error_message": "",
+                    "completed_at": "",
+                    "last_data_sent": "",
+                    # Clear any lingering state from the previous run so
+                    # monitoring, retry bookkeeping, and resumable-execution
+                    # water marks all start clean.
+                    "execution_result": "",
+                    "execution_log": "",
+                    "phase": "",
+                    "high_water_mark": "",
+                    "low_water_mark": "",
+                    "monitoring_details": "",
+                    "last_health_check": "",
+                },
+            },
+        )
+
+        await rabbitmq_client.publish(
+            self.queue_name, json.dumps({"wrapper_id": wrapper_id})
+        )
+        logger.info(f"Re-queued wrapper {wrapper_id} for regeneration")
+
+        updated = await db.generated_wrappers.find_one({"wrapper_id": wrapper_id})
+        return GeneratedWrapper(**updated)
 
     async def stop_wrapper_execution(self, wrapper_id: str) -> bool:
         """Stop a wrapper (universal method - internal logic varies by type)
