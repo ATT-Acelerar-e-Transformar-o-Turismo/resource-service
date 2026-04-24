@@ -28,6 +28,59 @@ from schemas.wrapper import (
 )
 from schemas.resource import ResourceCreate
 from config import settings
+
+# Gemini / google.genai error translation. Imported optionally so the service
+# still boots if the SDK moves things around in a future version.
+try:
+    from google.genai import errors as genai_errors  # type: ignore
+    _GENAI_API_ERROR = getattr(genai_errors, "APIError", None)
+except Exception:  # pragma: no cover — defensive
+    genai_errors = None  # type: ignore
+    _GENAI_API_ERROR = None
+
+
+def _translate_genai_error(exc: Exception) -> Optional[str]:
+    """Turn a raw google.genai APIError into a human-friendly message.
+
+    Returns None if the exception isn't something we recognise — caller
+    should then fall back to the generic error string.
+    """
+    if _GENAI_API_ERROR is None or not isinstance(exc, _GENAI_API_ERROR):
+        return None
+    # google.genai APIError has .code (HTTP status) and .status (string name).
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status", None) or ""
+    # Best-effort: the nested response JSON carries the retryDelay and
+    # quotaId for 429 so we can tailor the message.
+    details = getattr(exc, "details", None) or {}
+    msg = ""
+    if isinstance(details, dict):
+        msg = details.get("error", {}).get("message", "") if isinstance(details.get("error"), dict) else ""
+
+    if code == 429 or status == "RESOURCE_EXHAUSTED":
+        # Daily free-tier quota or per-minute rate limit. The retryDelay is
+        # typically seconds for per-minute, >24h for daily.
+        if "free_tier" in msg.lower() or "day" in msg.lower():
+            return (
+                "Gemini daily quota exhausted on the free tier. "
+                "Wait for the quota to reset (~24h), switch to a different model, "
+                "or upgrade the billing plan on the Google Cloud project."
+            )
+        return "Gemini rate limit hit. Wait a moment and click Regenerate."
+    if code == 503 or status == "UNAVAILABLE":
+        return (
+            "Gemini is temporarily overloaded. Wait a minute and click Regenerate."
+        )
+    if code and code >= 500:
+        return f"Gemini server error ({code}). Wait a moment and click Regenerate."
+    if code == 401 or status == "UNAUTHENTICATED":
+        return "Gemini API key is invalid or missing. Contact the administrator."
+    if code == 403 or status == "PERMISSION_DENIED":
+        return "Gemini API key doesn't have access to this model."
+    if code == 400 or status == "INVALID_ARGUMENT":
+        return "Gemini rejected the generation request. Try regenerating."
+    # Unknown API error — return a short form of whatever the server said.
+    return f"Gemini error ({status or code or 'unknown'})"
 import aio_pika
 import logging
 
@@ -354,10 +407,12 @@ class WrapperService:
                 f"Unexpected error processing wrapper {wrapper_id}: {e}",
                 exc_info=True,
             )
+            friendly = _translate_genai_error(e)
+            error_message = friendly or f"{type(e).__name__}: {e}"
             await self._update_wrapper_status(
                 wrapper_id,
                 WrapperStatus.ERROR,
-                error_message=f"{type(e).__name__}: {e}",
+                error_message=error_message,
             )
             raise
 
