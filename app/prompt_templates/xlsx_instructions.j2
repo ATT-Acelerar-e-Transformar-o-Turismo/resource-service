@@ -28,7 +28,7 @@ COLUMN SELECTION (USE EXACTLY THESE — do NOT pick different columns):
 
 EXAMPLE (multi-column emission):
 ```python
-df = pd.read_excel(file_path, sheet_name='{{ source_config.sheet_name or "Dados" }}')
+df = pd.read_excel(file_path{% if source_config.sheet_name %}, sheet_name='{{ source_config.sheet_name }}'{% endif %})
 df = df.dropna(subset=['{{ source_config.time_column }}'])
 df['__x'] = pd.to_datetime(df['{{ source_config.time_column }}'], format='%Y').dt.strftime('%Y-01-01T00:00:00')
 value_cols = {{ source_config.value_columns | tojson }}

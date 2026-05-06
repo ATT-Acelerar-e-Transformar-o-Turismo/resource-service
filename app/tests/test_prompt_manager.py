@@ -1,6 +1,6 @@
 """Tests for the column-hint plumbing added in Phase 2.
 
-Verifies that source_config.{sheet_name, time_column, value_column} flow into
+Verifies that source_config.{sheet_name, time_column, value_columns} flow into
 the rendered XLSX / CSV instructions. Without these hints, Gemini guesses a
 single column — the user reported this drops 9 of 10 columns from a multi-
 column sheet.

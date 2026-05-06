@@ -322,8 +322,9 @@ class WrapperGenerator:
                 if isinstance(entry, dict):
                     pt = str(entry.get("pt") or "").strip()
                     en = str(entry.get("en") or "").strip()
-                    if pt or en:
-                        cleaned[label] = {"pt": pt or label, "en": en or label}
+                else:
+                    pt, en = "", ""
+                cleaned[label] = {"pt": pt or label, "en": en or label}
             return cleaned
         except (asyncio.TimeoutError, json.JSONDecodeError, ValueError) as exc:
             logger.warning(

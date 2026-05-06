@@ -103,7 +103,7 @@ async def get_data_by_resource_id(
         pipeline = [
             {"$match": {"resource_id": resource_id}},
             {"$unwind": "$data"},
-            {"$project": {"x": "$data.x", "y": "$data.y", "_id": 0}},
+            {"$project": {"x": "$data.x", "y": "$data.y", "series": "$data.series", "_id": 0}},
         ]
 
         match_filter = {}
