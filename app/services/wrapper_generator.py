@@ -2,6 +2,7 @@ import asyncio
 import ast
 import aio_pika
 import json
+import logging
 import re
 from google import genai
 from google.genai import types
@@ -16,6 +17,8 @@ import random
 import pandas as pd
 from .prompt_manager import PromptManager
 from .wrapper_generation_tools import create_tool_runtime
+
+logger = logging.getLogger(__name__)
 
 
 class IndicatorMetadata:
@@ -266,6 +269,73 @@ class WrapperGenerator:
                 f"Gemini call timed out after {self._GEMINI_CALL_TIMEOUT_S}s"
             ) from exc
         return (response.text or "").strip()
+
+    # Sidecar: ask Gemini to produce PT/EN translations for the data columns
+    # we ingested. Used to seed the column-level translation editor in the
+    # admin UI — the admin can override anything wrong. Returns a dict of
+    # {original_label: {"pt": str, "en": str}}; failures yield {} so the
+    # caller can fall back gracefully without breaking wrapper completion.
+    async def translate_value_columns(
+        self,
+        value_columns: List[str],
+        indicator_name: str = "",
+        indicator_description: str = "",
+    ) -> Dict[str, Dict[str, str]]:
+        labels = [c for c in (value_columns or []) if isinstance(c, str) and c.strip()]
+        if not labels:
+            return {}
+
+        prompt = (
+            "You translate data-column headers for a sustainability/tourism "
+            "indicators dashboard. Given the indicator context and a list of "
+            "column names, return a JSON object mapping each original column "
+            "name to {\"pt\": Portuguese (Portugal) label, \"en\": English "
+            "label}. Keep labels short (<= 60 chars), Title Case, no quotes "
+            "or punctuation beyond what is meaningful, and keep proper nouns "
+            "(places, organisations) untranslated. If a label is already in "
+            "the target language, copy it as-is.\n\n"
+            f"INDICATOR NAME: {indicator_name or '-'}\n"
+            f"INDICATOR DESCRIPTION: {indicator_description or '-'}\n"
+            f"COLUMN NAMES: {json.dumps(labels, ensure_ascii=False)}\n\n"
+            "Return ONLY the JSON object — no prose, no code fences."
+        )
+
+        try:
+            config = types.GenerateContentConfig(response_mime_type="application/json")
+            response = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config,
+                ),
+                timeout=60,
+            )
+            raw = (response.text or "").strip()
+            if not raw:
+                return {}
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                return {}
+            cleaned: Dict[str, Dict[str, str]] = {}
+            for label in labels:
+                entry = parsed.get(label)
+                if isinstance(entry, dict):
+                    pt = str(entry.get("pt") or "").strip()
+                    en = str(entry.get("en") or "").strip()
+                else:
+                    pt, en = "", ""
+                cleaned[label] = {"pt": pt or label, "en": en or label}
+            return cleaned
+        except (asyncio.TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                f"translate_value_columns failed: {type(exc).__name__}: {exc}"
+            )
+            return {}
+        except Exception as exc:  # noqa: BLE001 — never block wrapper completion
+            logger.warning(
+                f"translate_value_columns unexpected error: {type(exc).__name__}: {exc}"
+            )
+            return {}
 
     async def _call_model_with_tools(
         self,

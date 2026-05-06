@@ -360,6 +360,21 @@ class WrapperService:
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id}, {"$set": update_data}
                 )
+
+                # Sidecar: ask Gemini to translate the file's value-column
+                # headers and ship them off to indicator-service. Best-effort:
+                # any failure is logged and silently swallowed by the
+                # translator so the wrapper still completes.
+                value_columns = getattr(wrapper.source_config, "value_columns", None)
+                if value_columns and resource_id:
+                    asyncio.create_task(
+                        self._publish_column_translations(
+                            wrapper_id=wrapper_id,
+                            resource_id=resource_id,
+                            value_columns=value_columns,
+                            metadata=wrapper.metadata,
+                        )
+                    )
             else:
                 # Mark as error regardless of source type
                 await db.generated_wrappers.update_one(
@@ -415,6 +430,44 @@ class WrapperService:
                 error_message=error_message,
             )
             raise
+
+    async def _publish_column_translations(
+        self,
+        wrapper_id: str,
+        resource_id: str,
+        value_columns: list,
+        metadata,
+    ):
+        """Sidecar Gemini call: translate column headers and emit an event.
+
+        Wrapped in its own task so it never blocks wrapper completion.
+        """
+        try:
+            translations = await self.generator.translate_value_columns(
+                value_columns=list(value_columns),
+                indicator_name=getattr(metadata, "name", "") or "",
+                indicator_description=getattr(metadata, "description", "") or "",
+            )
+            if not translations:
+                return
+            await rabbitmq_client.publish(
+                settings.WRAPPER_TRANSLATIONS_QUEUE,
+                json.dumps(
+                    {
+                        "wrapper_id": wrapper_id,
+                        "resource_id": resource_id,
+                        "translations": translations,
+                    }
+                ),
+            )
+            logger.info(
+                f"Published {len(translations)} column translations for wrapper {wrapper_id}"
+            )
+        except Exception as exc:  # noqa: BLE001 — never block wrapper completion
+            logger.warning(
+                f"Could not publish column translations for {wrapper_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     async def _update_wrapper_status(
         self,
