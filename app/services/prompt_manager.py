@@ -27,9 +27,11 @@ class PromptManager:
         # Get the main template
         template = self.env.get_template("wrapper_generation.j2")
 
-        # Get source-specific instructions using templates
+        # Get source-specific instructions using templates. Pass source_config
+        # so file-source templates can inject the user-picked sheet / columns
+        # — without it, Gemini guesses columns and silently picks one.
         source_specific_instructions = self._get_source_specific_instructions(
-            source_type, indicator_metadata.periodicity
+            source_type, indicator_metadata.periodicity, source_config
         )
 
         # Get wrapper template using Jinja2
@@ -74,9 +76,10 @@ class PromptManager:
         )
 
     def _get_source_specific_instructions(
-        self, source_type: str, periodicity: str
+        self, source_type: str, periodicity: str, source_config=None
     ) -> str:
-        """Get specific instructions based on source type - same logic, just templated"""
+        """Get specific instructions based on source type. source_config is
+        passed through so file templates can inject sheet / column hints."""
         if source_type == "CSV":
             template = self.env.get_template("csv_instructions.j2")
         elif source_type == "XLSX":
@@ -84,7 +87,7 @@ class PromptManager:
         else:  # API
             template = self.env.get_template("api_instructions.j2")
 
-        return template.render(periodicity=periodicity)
+        return template.render(periodicity=periodicity, source_config=source_config)
 
     def get_wrapper_template(self, source_type: str, periodicity: str = "Daily") -> str:
         """Get the wrapper template rendered with source type and periodicity"""

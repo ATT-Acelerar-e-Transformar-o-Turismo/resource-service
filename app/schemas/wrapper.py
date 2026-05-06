@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Dict, Any, Optional, Union, Annotated
+from typing import Dict, Any, List, Optional, Union, Annotated
 from datetime import datetime
 from enum import Enum
 import uuid
@@ -40,11 +40,30 @@ class IndicatorMetadata(BaseModel):
     periodicity: str = Field(..., description="Data collection frequency")
 
 
-# Source-specific configurations
+# Source-specific configurations.
+# CSV and XLSX share an identical Python type today, and the parent
+# WrapperGenerationRequest carries `source_type` separately. Because the
+# Union[CSV, XLSX, API] is non-discriminated, pydantic's order picks the first
+# match — to avoid silently dropping XLSX-only fields when this happens, both
+# schemas keep the SAME optional column-hint fields. CSV ignores sheet_name at
+# runtime; the wrapper generator dispatches on the parent source_type.
+#
+# value_columns: each entry becomes one series on the chart. The wrapper emits
+# one DataPoint per (row × column) tagged with the column name in `series`.
 class CSVSourceConfig(BaseModel):
     file_id: str = Field(..., description="File ID for uploaded CSV file")
     location: Optional[str] = Field(
         None, description="Computed file path (populated by backend)"
+    )
+    sheet_name: Optional[str] = Field(
+        None, description="Unused for CSV; present for schema parity with XLSX"
+    )
+    time_column: Optional[str] = Field(
+        None, description="Column name to use as the X (time/key) axis"
+    )
+    value_columns: Optional[List[str]] = Field(
+        None,
+        description="Columns to extract — each becomes a separate series on the chart",
     )
 
 
@@ -52,6 +71,16 @@ class XLSXSourceConfig(BaseModel):
     file_id: str = Field(..., description="File ID for uploaded XLSX file")
     location: Optional[str] = Field(
         None, description="Computed file path (populated by backend)"
+    )
+    sheet_name: Optional[str] = Field(
+        None, description="Sheet to read (default: first sheet with data)"
+    )
+    time_column: Optional[str] = Field(
+        None, description="Column name to use as the X (time/key) axis"
+    )
+    value_columns: Optional[List[str]] = Field(
+        None,
+        description="Columns to extract — each becomes a separate series on the chart",
     )
 
 

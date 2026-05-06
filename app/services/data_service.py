@@ -28,7 +28,9 @@ async def create_data_segment(
         # Store raw data segment (convert to json)
         await db.data_segments.insert_one(new_datasegment.model_dump())
 
-        # Merge logic with created_at-based override
+        # Merge logic with created_at-based override. Dedup key is
+        # (x, series) so multi-column files (one resource → many series) don't
+        # collapse onto a single point per x.
         all_points_cursor = db.data_segments.find(
             {"resource_id": resource_id}, {"points": 1, "created_at": 1, "_id": 0}
         )
@@ -39,14 +41,15 @@ async def create_data_segment(
             if not segment_created_at:
                 continue
             for point in segment.get("points", []):
-                x_val = point["x"]
+                key = (point["x"], point.get("series"))
                 if (
-                    x_val not in points_map
-                    or segment_created_at > points_map[x_val]["created_at"]
+                    key not in points_map
+                    or segment_created_at > points_map[key]["created_at"]
                 ):
-                    points_map[x_val] = {
-                        "x": x_val,
+                    points_map[key] = {
+                        "x": point["x"],
                         "y": point["y"],
+                        "series": point.get("series"),
                         "created_at": segment_created_at,
                     }
 
@@ -55,8 +58,10 @@ async def create_data_segment(
 
         merged_points = sorted(list(points_map.values()), key=lambda p: p["x"])
 
-        # Remove created_at from merged_points before storing
-        merged_data_points = [{"x": p["x"], "y": p["y"]} for p in merged_points]
+        # Remove created_at from merged_points before storing; keep series.
+        merged_data_points = [
+            {"x": p["x"], "y": p["y"], "series": p.get("series")} for p in merged_points
+        ]
 
         # Store merged data
         await db.resources_data.update_one(
