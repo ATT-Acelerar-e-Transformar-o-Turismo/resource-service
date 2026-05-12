@@ -18,6 +18,7 @@ services:
       - resource_generated_wrappers:/app/generated_wrappers
       - resource_wrapper_logs:/app/wrapper_logs
       - resource_prompts:/app/prompts
+      - resource_uploads:/app/uploads
     networks:
       - resource-network
       - mq-network
@@ -58,6 +59,7 @@ volumes:
   resource_generated_wrappers:
   resource_wrapper_logs:
   resource_prompts:
+  resource_uploads:
 
 networks:
   resource-network:
