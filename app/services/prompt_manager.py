@@ -43,6 +43,7 @@ class PromptManager:
         return template.render(
             indicator_metadata=indicator_metadata,
             source_config=source_config,
+            source_type=source_type,
             wrapper_id=wrapper_id,
             data_sample=data_sample,
             wrapper_template=wrapper_template,

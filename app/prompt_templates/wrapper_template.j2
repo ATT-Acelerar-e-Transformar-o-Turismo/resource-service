@@ -31,7 +31,12 @@ class ATTWrapper:
             import base64
             credentials = base64.b64encode(f"{self.source_config['username']}:{self.source_config.get('password', '')}".encode()).decode()
             self.headers['Authorization'] = f"Basic {credentials}"
-        
+
+        # Default query parameters configured for this source (e.g. an
+        # `?apikey=...` style key, or a tenant id) — merge with per-request
+        # params via {**self.params, ...} when making API calls.
+        self.params = dict(self.source_config.get('query_params', {}))
+
         # Wrapper metadata
         self.metadata = {
             "source_type": self.source_type,

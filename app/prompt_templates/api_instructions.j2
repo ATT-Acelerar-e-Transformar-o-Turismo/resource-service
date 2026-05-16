@@ -4,6 +4,30 @@ API IMPLEMENTATION:
 - Runs continuously with {{ periodicity }} periodicity
 - Handle rate limiting and pagination
 
+CONFIGURED AUTH FOR THIS RESOURCE:
+{% if source_config and source_config.auth_type == 'api_key' %}
+- auth_type = api_key
+- The API key is sent as the header `{{ source_config.api_key_header or 'X-API-Key' }}` (already present in self.headers).
+- DO NOT hardcode the key. DO NOT add it to the URL. Just pass headers=self.headers.
+- If your test calls fail with 401/403, the most likely cause is that you forgot headers=self.headers — fix that, not the URL.
+{% elif source_config and source_config.auth_type == 'bearer' %}
+- auth_type = bearer
+- The token is sent as `Authorization: Bearer <token>` (already present in self.headers).
+- DO NOT hardcode the token. DO NOT build the Authorization header yourself. Just pass headers=self.headers.
+{% elif source_config and source_config.auth_type == 'basic' %}
+- auth_type = basic
+- Credentials are sent as `Authorization: Basic <base64>` (already present in self.headers).
+- DO NOT hardcode username/password. Just pass headers=self.headers.
+{% else %}
+- auth_type = none — the endpoint is expected to be public. Do NOT invent auth headers.
+{% endif %}
+{% if source_config and source_config.custom_headers %}
+- Extra custom headers configured ({{ source_config.custom_headers|length }}): already present in self.headers — keep passing headers=self.headers.
+{% endif %}
+{% if source_config and source_config.query_params %}
+- Default query params configured ({{ source_config.query_params|length }}): merge them into your request params (params=self.params) along with any date filters.
+{% endif %}
+
 SOURCE CONFIG SCHEMA (APISourceConfig):
 - location: str (API endpoint URL)
 - auth_type: str (none/api_key/bearer/basic)
