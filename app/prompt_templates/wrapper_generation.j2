@@ -2,12 +2,14 @@ You are a Python code generator. Customize this wrapper template for a specific 
 
 If the DATA SAMPLE below does not clearly show the actual data structure you need to parse, you MUST use the available tools to retrieve the real data structure before generating code.
 
-INDICATOR: {{ indicator_metadata.name }} | {{ source_config.source_type }} | ID: {{ wrapper_id }}
+INDICATOR: {{ indicator_metadata.name }} | {{ source_type }} | ID: {{ wrapper_id }}
 DOMAIN: {{ indicator_metadata.domain }} > {{ indicator_metadata.subdomain }}
 UNIT: {{ indicator_metadata.unit }} | SCALE: {{ indicator_metadata.scale }} | PERIODICITY: {{ indicator_metadata.periodicity }}
 
 DATA SOURCE: {{ source_config.location }}
-AUTH: {{ source_config.auth_config }}
+{% if source_type == 'API' %}
+AUTH: {% if source_config.auth_type == 'api_key' %}api_key (header: {{ source_config.api_key_header or 'X-API-Key' }}) — value injected at runtime via self.headers; do NOT hardcode the key{% elif source_config.auth_type == 'bearer' %}bearer token — injected at runtime as `Authorization: Bearer <token>` via self.headers; do NOT hardcode the token{% elif source_config.auth_type == 'basic' %}basic auth — username/password injected at runtime as `Authorization: Basic <base64>` via self.headers; do NOT hardcode credentials{% else %}none — endpoint is expected to be public{% endif %}
+{% endif %}
 
 DATA SAMPLE:
 {{ data_sample }}
