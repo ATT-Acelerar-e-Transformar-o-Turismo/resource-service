@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 import time
 from typing import Optional, Dict, Any, List, Callable, Awaitable
 from requests.models import Response
@@ -548,17 +549,21 @@ class MessageQueueSender:
 
 def get_interval_from_periodicity(periodicity: str) -> int:
     """
-    Convert periodicity string to seconds
+    Convert periodicity string to seconds.
 
-    Args:
-        periodicity: String like 'Daily', 'Hourly', 'Weekly', etc.
+    Recognises both English ("Daily", "Hourly", "Weekly", …) and Portuguese
+    ("Diário", "Horário", "Semanal", "Mensal", "Anual", …) labels because the
+    UI lets users type a free-text periodicity in their native language.
+    Unrecognised values fall back to daily.
 
-    Returns:
-        Number of seconds for the interval
+    Yearly-ish periodicities are intentionally clamped to one day so the
+    wrapper still picks up new API data within 24h instead of sleeping for
+    a full year.
     """
     periodicity_lower = periodicity.lower()
 
-    if "minute" in periodicity_lower:
+    # Minute (incl. Portuguese "minuto")
+    if "minute" in periodicity_lower or "minut" in periodicity_lower:
         if "5" in periodicity_lower:
             return 5 * 60
         elif "10" in periodicity_lower:
@@ -569,14 +574,43 @@ def get_interval_from_periodicity(periodicity: str) -> int:
             return 30 * 60
         else:
             return 60  # Default to 1 minute
-    elif "hour" in periodicity_lower:
+    # Hour: "hour", "hourly", "hora", "horário", "horária"
+    elif "hour" in periodicity_lower or "horár" in periodicity_lower or "hora" in periodicity_lower:
         return 3600
-    elif "daily" in periodicity_lower or "day" in periodicity_lower:
+    # Day: "daily", "day", "diário", "diária", "diariamente"
+    elif (
+        "daily" in periodicity_lower
+        or "day" in periodicity_lower
+        or "diár" in periodicity_lower
+        or "dia" in periodicity_lower
+    ):
         return 3600 * 24
-    elif "weekly" in periodicity_lower or "week" in periodicity_lower:
+    # Week: "weekly", "week", "semana", "semanal"
+    elif (
+        "weekly" in periodicity_lower
+        or "week" in periodicity_lower
+        or "semana" in periodicity_lower
+    ):
         return 3600 * 24 * 7
-    elif "monthly" in periodicity_lower or "month" in periodicity_lower:
+    # Month: "monthly", "month", "mensal", "mês", "meses"
+    elif (
+        "monthly" in periodicity_lower
+        or "month" in periodicity_lower
+        or "mensal" in periodicity_lower
+        or "mês" in periodicity_lower
+        or "meses" in periodicity_lower
+    ):
         return 3600 * 24 * 30
+    # Year: "yearly", "year", "anual", "anualmente", "ano". Clamp to 24h —
+    # an annual indicator polled once per year would never surface mid-year
+    # API updates.
+    elif (
+        "yearly" in periodicity_lower
+        or "year" in periodicity_lower
+        or "anual" in periodicity_lower
+        or "ano" in periodicity_lower
+    ):
+        return 3600 * 24
     else:
         # Default to daily if not recognized
         return 3600 * 24
@@ -669,6 +703,18 @@ class ContinuousExecutor:
             print(f"Wrapper {self.wrapper_id}: Continuous mode using run_once")
         print(f"Interval: {self.interval_seconds}s")
 
+        # First continuous sleep is jittered so a cohort of wrappers that
+        # entered continuous mode together (e.g. after a service restart or
+        # batch regeneration) spreads out over the polling window instead of
+        # waking in sync every interval and hammering APIs / data-collector.
+        # Subsequent sleeps are exactly `interval_seconds` from each
+        # wrapper's own previous wake, so the spread is preserved naturally.
+        # Range is [0.5, 1.0] × interval — never less than half the interval
+        # so a wrapper doesn't burn the API immediately, never more than the
+        # interval so the user sees at least one poll per `interval_seconds`
+        # window.
+        first_sleep = True
+
         while True:
             try:
                 if use_date_range:
@@ -730,10 +776,19 @@ class ContinuousExecutor:
                 else:
                     await run_once_func()
 
-                print(
-                    f"Wrapper {self.wrapper_id}: Waiting {self.interval_seconds}s until next execution..."
-                )
-                await asyncio.sleep(self.interval_seconds)
+                if first_sleep:
+                    sleep_for = self.interval_seconds * random.uniform(0.5, 1.0)
+                    first_sleep = False
+                    print(
+                        f"Wrapper {self.wrapper_id}: Waiting {sleep_for:.0f}s "
+                        f"(jittered first sleep) until next execution..."
+                    )
+                else:
+                    sleep_for = self.interval_seconds
+                    print(
+                        f"Wrapper {self.wrapper_id}: Waiting {self.interval_seconds}s until next execution..."
+                    )
+                await asyncio.sleep(sleep_for)
             except KeyboardInterrupt:
                 print(f"Wrapper {self.wrapper_id}: Stopping execution")
                 break
