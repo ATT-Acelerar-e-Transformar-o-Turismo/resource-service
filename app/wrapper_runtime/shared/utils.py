@@ -592,12 +592,13 @@ def get_interval_from_periodicity(periodicity: str) -> int:
         or "semana" in periodicity_lower
     ):
         return 3600 * 24 * 7
-    # Month: "monthly", "month", "mensal", "mês", "meses"
+    # Month: "monthly", "month", "mensal", "mês", "mes" (unaccented), "meses"
     elif (
         "monthly" in periodicity_lower
         or "month" in periodicity_lower
         or "mensal" in periodicity_lower
         or "mês" in periodicity_lower
+        or "mes" in periodicity_lower
         or "meses" in periodicity_lower
     ):
         return 3600 * 24 * 30
