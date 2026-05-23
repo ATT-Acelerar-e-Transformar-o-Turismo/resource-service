@@ -47,6 +47,7 @@ class ProcessWrapperRunner(WrapperRunner):
                 resume_phase=resume_phase,
                 resume_high_water_mark=resume_high_water_mark,
                 resume_low_water_mark=resume_low_water_mark,
+                continuous=wrapper.source_type == SourceType.API,
             )
 
             if success:

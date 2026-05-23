@@ -17,7 +17,7 @@ WRAPPER_DIR = "/app/generated_wrappers"
 
 
 class WrapperProcess:
-    def __init__(self, wrapper_id: str, process: subprocess.Popen, temp_file_path: str):
+    def __init__(self, wrapper_id: str, process: subprocess.Popen, temp_file_path: str, continuous: bool = False):
         self.wrapper_id = wrapper_id
         self.process = process
         self.temp_file_path = temp_file_path
@@ -26,6 +26,13 @@ class WrapperProcess:
         # Whether this wrapper is holding a concurrency slot from the manager's
         # semaphore. Set after a successful acquire in start_wrapper_process.
         self.holds_slot = False
+        # API wrappers run a polling loop forever; one-shot file wrappers
+        # (CSV/XLSX) finish quickly. The execution-timeout health check only
+        # applies to one-shot wrappers — without this distinction, every API
+        # wrapper got killed after WRAPPER_EXECUTION_TIMEOUT_SECONDS and
+        # never resumed, so its resource would only ever carry the data from
+        # the initial historical fetch.
+        self.continuous = continuous
 
 
 class _AdoptedProcess:
@@ -109,7 +116,11 @@ class WrapperProcessManager:
 
                     wrapper_file = f"{WRAPPER_DIR}/{wrapper_id}.py"
                     process = _AdoptedProcess(pid)
-                    wp = WrapperProcess(wrapper_id, process, wrapper_file)
+                    # Adopted wrapper subprocesses are by definition long-lived
+                    # (only API wrappers survive a service restart — file
+                    # wrappers complete and exit). Mark continuous so the
+                    # execution-timeout watchdog doesn't kill them.
+                    wp = WrapperProcess(wrapper_id, process, wrapper_file, continuous=True)
                     # Adopted processes already exist; they don't consume a
                     # new-spawn slot. holds_slot stays False so cleanup won't
                     # release an uncounted slot.
@@ -219,9 +230,12 @@ class WrapperProcessManager:
 
                 else:
                     # Process is running. Enforce execution timeout if set.
+                    # Skip for continuous (API) wrappers — they're supposed
+                    # to run forever; killing them mid-poll-cycle was the
+                    # bug that left indicators stuck on initial-load data.
                     now = datetime.utcnow()
                     wrapper_process.last_health_check = now
-                    if self._execution_timeout is not None:
+                    if self._execution_timeout is not None and not wrapper_process.continuous:
                         runtime = (now - wrapper_process.started_at).total_seconds()
                         if runtime > self._execution_timeout:
                             logger.warning(
@@ -337,6 +351,7 @@ class WrapperProcessManager:
         resume_phase: Optional[str] = None,
         resume_high_water_mark: Optional[str] = None,
         resume_low_water_mark: Optional[str] = None,
+        continuous: bool = False,
     ) -> bool:
         """Start a wrapper in a separate process.
 
@@ -403,7 +418,7 @@ class WrapperProcessManager:
             )
 
             # Store process info
-            wrapper_process = WrapperProcess(wrapper_id, process, wrapper_file_path)
+            wrapper_process = WrapperProcess(wrapper_id, process, wrapper_file_path, continuous=continuous)
             wrapper_process.holds_slot = True
             self.running_processes[wrapper_id] = wrapper_process
             # Slot ownership transferred to wrapper_process; do not release
