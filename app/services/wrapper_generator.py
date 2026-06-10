@@ -18,6 +18,14 @@ import pandas as pd
 from .prompt_manager import PromptManager
 from .wrapper_generation_tools import create_tool_runtime
 
+# google.genai error type, imported optionally so retry logic still works (and
+# the module still imports) if the SDK reshuffles things in a future version.
+try:
+    from google.genai import errors as _genai_errors  # type: ignore
+    _GENAI_API_ERROR_TYPE = getattr(_genai_errors, "APIError", None)
+except Exception:  # pragma: no cover — defensive
+    _GENAI_API_ERROR_TYPE = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -255,19 +263,114 @@ class WrapperGenerator:
 
     _GEMINI_CALL_TIMEOUT_S = 300
 
+    # Transient Gemini failures — 503 "the model is overloaded", 429
+    # rate-limits, and 5xx server errors — are common and almost always clear
+    # within seconds. Retry with exponential backoff + jitter instead of
+    # failing the whole generation on the first blip and forcing the admin to
+    # click Regenerate by hand.
+    _MAX_GEMINI_RETRIES = 5
+    _BASE_BACKOFF_S = 2.0
+    _MAX_BACKOFF_S = 30.0
+    # A server-suggested retry longer than this signals a long quota window
+    # (e.g. a daily free-tier reset), not a transient blip — surface it
+    # instead of spinning on it.
+    _MAX_HONORED_RETRY_DELAY_S = 120.0
+    _RETRYABLE_CODES = frozenset({429, 500, 502, 503, 504})
+    _RETRYABLE_STATUSES = frozenset(
+        {"UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL", "DEADLINE_EXCEEDED"}
+    )
+    _GENAI_API_ERROR = _GENAI_API_ERROR_TYPE
+
+    @classmethod
+    def _is_transient_gemini_error(cls, exc: Exception) -> bool:
+        """True if exc is a Gemini API error worth retrying. Only genai
+        APIErrors qualify — never an arbitrary exception that happens to carry
+        a numeric .code attribute."""
+        if cls._GENAI_API_ERROR is not None and not isinstance(
+            exc, cls._GENAI_API_ERROR
+        ):
+            return False
+        code = getattr(exc, "code", None)
+        status = (getattr(exc, "status", None) or "").upper()
+        return code in cls._RETRYABLE_CODES or status in cls._RETRYABLE_STATUSES
+
+    @staticmethod
+    def _gemini_retry_delay_s(exc: Exception) -> Optional[float]:
+        """Extract the server-suggested retry delay (seconds) from a genai
+        APIError's RetryInfo, if present. Returns None when absent or
+        unparseable."""
+        details = getattr(exc, "details", None)
+        error = details.get("error") if isinstance(details, dict) else None
+        items = error.get("details") if isinstance(error, dict) else None
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if isinstance(item, dict) and str(item.get("@type", "")).endswith(
+                "RetryInfo"
+            ):
+                raw = str(item.get("retryDelay", "")).strip().rstrip("s")
+                try:
+                    return float(raw)
+                except ValueError:
+                    return None
+        return None
+
+    async def _generate_content_with_retry(
+        self, *, timeout: Optional[int] = None, **gen_kwargs
+    ):
+        """Wrap client.aio.models.generate_content with a per-attempt timeout
+        and exponential-backoff retry on transient Gemini errors. Raises
+        ValueError on timeout; re-raises the underlying error once retries are
+        exhausted (or immediately for non-transient errors)."""
+        per_attempt_timeout = timeout or self._GEMINI_CALL_TIMEOUT_S
+        attempt = 0
+        while True:
+            try:
+                return await asyncio.wait_for(
+                    self.client.aio.models.generate_content(**gen_kwargs),
+                    timeout=per_attempt_timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                raise ValueError(
+                    f"Gemini call timed out after {per_attempt_timeout}s"
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 — re-raised below unless transient
+                if not self._is_transient_gemini_error(exc):
+                    raise
+                attempt += 1
+                if attempt > self._MAX_GEMINI_RETRIES:
+                    logger.warning(
+                        f"Gemini still failing after {self._MAX_GEMINI_RETRIES} "
+                        f"retries; giving up ({type(exc).__name__})"
+                    )
+                    raise
+                suggested = self._gemini_retry_delay_s(exc)
+                if (
+                    suggested is not None
+                    and suggested > self._MAX_HONORED_RETRY_DELAY_S
+                ):
+                    logger.warning(
+                        f"Gemini asked to retry in {suggested:.0f}s "
+                        f"(> {self._MAX_HONORED_RETRY_DELAY_S:.0f}s); not waiting"
+                    )
+                    raise
+                backoff = min(
+                    self._BASE_BACKOFF_S * (2 ** (attempt - 1)), self._MAX_BACKOFF_S
+                )
+                delay = suggested if suggested is not None else backoff
+                delay += random.uniform(0, max(delay, 1.0) * 0.25)  # jitter
+                code = getattr(exc, "code", None) or getattr(exc, "status", "?")
+                logger.warning(
+                    f"Gemini transient error ({code}); retry "
+                    f"{attempt}/{self._MAX_GEMINI_RETRIES} in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+
     async def _call_model(self, prompt: str) -> str:
-        try:
-            response = await asyncio.wait_for(
-                self.client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                ),
-                timeout=self._GEMINI_CALL_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError as exc:
-            raise ValueError(
-                f"Gemini call timed out after {self._GEMINI_CALL_TIMEOUT_S}s"
-            ) from exc
+        response = await self._generate_content_with_retry(
+            model=self.model_name,
+            contents=prompt,
+        )
         return (response.text or "").strip()
 
     # Sidecar: ask Gemini to produce PT/EN translations for the data columns
@@ -302,12 +405,10 @@ class WrapperGenerator:
 
         try:
             config = types.GenerateContentConfig(response_mime_type="application/json")
-            response = await asyncio.wait_for(
-                self.client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=config,
-                ),
+            response = await self._generate_content_with_retry(
+                model=self.model_name,
+                contents=prompt,
+                config=config,
                 timeout=60,
             )
             raw = (response.text or "").strip()
@@ -372,19 +473,11 @@ class WrapperGenerator:
         }
 
         while True:
-            try:
-                response = await asyncio.wait_for(
-                    self.client.aio.models.generate_content(
-                        model=self.model_name,
-                        contents=contents,
-                        config=config,
-                    ),
-                    timeout=self._GEMINI_CALL_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError as exc:
-                raise ValueError(
-                    f"Gemini call timed out after {self._GEMINI_CALL_TIMEOUT_S}s"
-                ) from exc
+            response = await self._generate_content_with_retry(
+                model=self.model_name,
+                contents=contents,
+                config=config,
+            )
 
             function_calls = response.function_calls or []
 
@@ -450,19 +543,11 @@ class WrapperGenerator:
                         ],
                     )
                 )
-                try:
-                    final_response = await asyncio.wait_for(
-                        self.client.aio.models.generate_content(
-                            model=self.model_name,
-                            contents=contents,
-                            config=types.GenerateContentConfig(),
-                        ),
-                        timeout=self._GEMINI_CALL_TIMEOUT_S,
-                    )
-                except asyncio.TimeoutError as exc:
-                    raise ValueError(
-                        f"Gemini call timed out after {self._GEMINI_CALL_TIMEOUT_S}s"
-                    ) from exc
+                final_response = await self._generate_content_with_retry(
+                    model=self.model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(),
+                )
                 trace["final_response"] = (final_response.text or "").strip()
                 trace["turns"].append(
                     {

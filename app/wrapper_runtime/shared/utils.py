@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import re
 import time
 from typing import Optional, Dict, Any, List, Callable, Awaitable
 from requests.models import Response
@@ -551,16 +552,39 @@ def get_interval_from_periodicity(periodicity: str) -> int:
     """
     Convert periodicity string to seconds.
 
-    Recognises both English ("Daily", "Hourly", "Weekly", …) and Portuguese
-    ("Diário", "Horário", "Semanal", "Mensal", "Anual", …) labels because the
-    UI lets users type a free-text periodicity in their native language.
+    Recognises:
+      * English keywords ("Daily", "Hourly", "Weekly", …)
+      * Portuguese keywords ("Diário", "Horário", "Semanal", "Mensal", "Anual", …)
+      * Compact "<N><unit>" abbreviations users type in the periodicity
+        field, e.g. "15m", "30min", "1h", "6h", "1d", "2w".
+
     Unrecognised values fall back to daily.
 
     Yearly-ish periodicities are intentionally clamped to one day so the
     wrapper still picks up new API data within 24h instead of sleeping for
     a full year.
     """
-    periodicity_lower = periodicity.lower()
+    periodicity_lower = periodicity.lower().strip()
+
+    # Compact "<N><unit>" form, e.g. "15m", "30min", "1h", "6h", "1d", "2w".
+    # The keyword-substring rules below don't catch these — "15m" has no
+    # "minute"/"hour"/etc. substring — so it falls through to daily, which
+    # was the bug that left a wrapper polling once every 24h instead of
+    # every 15 minutes.
+    compact = re.fullmatch(
+        r"\s*(\d+)\s*(min|m|hr|h|d|w)\s*", periodicity_lower
+    )
+    if compact:
+        n = int(compact.group(1))
+        unit = compact.group(2)
+        if unit in ("m", "min"):
+            return max(60, n * 60)
+        if unit in ("h", "hr"):
+            return max(60, n * 3600)
+        if unit == "d":
+            return n * 86400
+        if unit == "w":
+            return n * 86400 * 7
 
     # Minute (incl. Portuguese "minuto")
     if "minute" in periodicity_lower or "minut" in periodicity_lower:
