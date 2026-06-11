@@ -16,6 +16,37 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def _attach_source_types(resources: List[dict]) -> List[dict]:
+    """Batch-fetch the wrappers for the given resources and stamp each
+    resource with the wrapper's `source_type` ("API" / "CSV" / "XLSX").
+
+    The resource document's own `type` field is the resource category
+    (e.g. "sustainability_indicator"), not its data source, so the UI
+    can't classify API vs upload from the resource alone.
+    """
+    if not resources:
+        return resources
+
+    wrapper_ids = {r.get("wrapper_id") for r in resources if r.get("wrapper_id")}
+    source_by_wrapper: dict = {}
+    if wrapper_ids:
+        try:
+            cursor = db.generated_wrappers.find(
+                {"wrapper_id": {"$in": list(wrapper_ids)}},
+                {"wrapper_id": 1, "source_type": 1, "_id": 0},
+            )
+            async for w in cursor:
+                source_by_wrapper[w["wrapper_id"]] = w.get("source_type")
+        except OperationFailure as e:
+            # Don't fail the resource list because the side-lookup broke —
+            # source_type stays null and the UI just treats it as unknown.
+            logger.warning(f"Could not load wrapper source_types: {e}")
+
+    for r in resources:
+        r["source_type"] = source_by_wrapper.get(r.get("wrapper_id"))
+    return resources
+
+
 async def get_all_resources(skip: int = 0, limit: int = 10) -> List[dict]:
     try:
         resources = (
@@ -24,7 +55,8 @@ async def get_all_resources(skip: int = 0, limit: int = 10) -> List[dict]:
             .limit(limit)
             .to_list(limit)
         )
-        return [serialize(resource) for resource in resources]
+        serialized = [serialize(resource) for resource in resources]
+        return await _attach_source_types(serialized)
     except OperationFailure as e:
         logger.error(f"Database operation failed in get_all_resources: {e}")
         raise
@@ -35,7 +67,11 @@ async def get_resource_by_id(resource_id: str) -> Optional[dict]:
         resource = await db.resources.find_one(
             {"_id": ObjectId(resource_id), "deleted": False}
         )
-        return serialize(resource) if resource else None
+        if not resource:
+            return None
+        serialized = serialize(resource)
+        await _attach_source_types([serialized])
+        return serialized
     except InvalidId as e:
         logger.error(f"Invalid resource ID format: {resource_id}")
         raise ValueError(f"Invalid resource ID: {resource_id}")
