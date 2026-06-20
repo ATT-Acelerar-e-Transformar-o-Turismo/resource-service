@@ -9,6 +9,9 @@ class ResourceBase(BaseModel):
     wrapper_id: str
     name: str
     type: str
+    # Optional admin-curated label shown in the chart legend for this
+    # resource's data series. Falls back to the column/file name when unset.
+    legend: Optional[str] = None
 
 
 class ResourceCreate(ResourceBase):
@@ -22,6 +25,7 @@ class ResourceUpdate(ResourceBase):
 class ResourcePatch(BaseModel):
     name: Optional[str] = None
     type: Optional[str] = None
+    legend: Optional[str] = None
 
 
 class Resource(ResourceBase):
