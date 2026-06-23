@@ -11,6 +11,28 @@ import json
 from config import wrapper_settings as settings
 
 
+# --- Force IPv4 for all outbound HTTP requests -------------------------------
+# Every generated wrapper imports this module and fetches from external APIs
+# via `requests`/urllib3, which resolves both A and AAAA records and tries them
+# in getaddrinfo order. On hosts without a working IPv6 route (notably
+# production) an AAAA-first attempt hangs until the 30s connect timeout, so a
+# fetch intermittently fails with "Connection to <host> timed out" even though
+# the same URL succeeds over IPv4 moments earlier. Restricting urllib3 to IPv4
+# removes the dead IPv6 path entirely. Mirrors the net.ipv6.conf disable applied
+# to the resource-service container, but travels with the code so it also
+# protects environments whose compose lacks those sysctls.
+try:
+    import socket as _socket
+    import urllib3.util.connection as _urllib3_conn
+
+    def _allowed_gai_family():
+        return _socket.AF_INET
+
+    _urllib3_conn.allowed_gai_family = _allowed_gai_family
+except Exception:  # pragma: no cover - never block wrapper startup on this
+    pass
+
+
 def mask_credentials(url: str) -> str:
     """
     Mask credentials in URLs for secure logging
