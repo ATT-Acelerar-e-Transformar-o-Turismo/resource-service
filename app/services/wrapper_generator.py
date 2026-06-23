@@ -261,7 +261,12 @@ class WrapperGenerator:
 
         return None
 
-    _GEMINI_CALL_TIMEOUT_S = 300
+    # Per-attempt ceiling for a single generate_content call. A flash code-gen
+    # call returns in well under a minute; anything approaching this is a
+    # stalled connection (the client has no transport-level timeout), so cap it
+    # low enough that a hang is detected and retried promptly instead of leaving
+    # the wrapper sitting in "generating" for minutes per attempt.
+    _GEMINI_CALL_TIMEOUT_S = 120
 
     # Transient Gemini failures — 503 "the model is overloaded", 429
     # rate-limits, and 5xx server errors — are common and almost always clear
@@ -331,9 +336,25 @@ class WrapperGenerator:
                     timeout=per_attempt_timeout,
                 )
             except asyncio.TimeoutError as exc:
-                raise ValueError(
-                    f"Gemini call timed out after {per_attempt_timeout}s"
-                ) from exc
+                # A single hung call shouldn't fail the whole generation — a
+                # stalled connection to the Gemini endpoint almost always clears
+                # on a fresh attempt. Retry with backoff like other transient
+                # errors, only giving up once the retry budget is exhausted.
+                attempt += 1
+                if attempt > self._MAX_GEMINI_RETRIES:
+                    raise ValueError(
+                        f"Gemini call timed out after {per_attempt_timeout}s on "
+                        f"every attempt ({self._MAX_GEMINI_RETRIES} retries)"
+                    ) from exc
+                backoff = min(
+                    self._BASE_BACKOFF_S * (2 ** (attempt - 1)), self._MAX_BACKOFF_S
+                )
+                delay = backoff + random.uniform(0, backoff * 0.25)  # jitter
+                logger.warning(
+                    f"Gemini call timed out after {per_attempt_timeout}s; retry "
+                    f"{attempt}/{self._MAX_GEMINI_RETRIES} in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
             except Exception as exc:  # noqa: BLE001 — re-raised below unless transient
                 if not self._is_transient_gemini_error(exc):
                     raise
