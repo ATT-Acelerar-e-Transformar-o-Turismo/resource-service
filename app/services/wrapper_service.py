@@ -627,6 +627,9 @@ class WrapperService:
                     "data_points_count": 0,
                 },
                 "$unset": {
+                    # Regeneration means the wrapper was wrong and needs fresh
+                    # AI-generated code — so clear the old code to force a real
+                    # regeneration (files rebuild deterministically instead).
                     "generated_code": "",
                     "error_message": "",
                     "completed_at": "",
