@@ -115,7 +115,11 @@ async def update_resource(
             {"_id": ObjectId(resource_id), "deleted": False},
             {"$set": deserialize(resource_data)},
         )
-        if result.modified_count > 0:
+        # Key off matched_count, not modified_count: a no-op update (e.g.
+        # patching legend=null onto a resource whose legend is already null)
+        # leaves modified_count == 0 even though the resource exists — treating
+        # that as "not found" produced spurious 404s on the legend PATCH.
+        if result.matched_count > 0:
             return await get_resource_by_id(resource_id)
         return None
     except InvalidId as e:
