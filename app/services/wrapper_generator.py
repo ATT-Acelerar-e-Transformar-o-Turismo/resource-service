@@ -55,6 +55,14 @@ def append_wrapper_log(wrapper_id: str, message: str, reset: bool = False) -> No
         return
     try:
         os.makedirs(WRAPPER_LOGS_DIR, exist_ok=True)
+        if reset:
+            # Also clear the companion stderr file so a previous run's
+            # traceback doesn't bleed into the new run's logs (get_logs reads
+            # both stdout and stderr).
+            try:
+                open(f"{WRAPPER_LOGS_DIR}/{wrapper_id}_stderr.log", "w").close()
+            except OSError:
+                pass
         with open(f"{WRAPPER_LOGS_DIR}/{wrapper_id}_stdout.log", "w" if reset else "a") as f:
             f.write(f"[{datetime.now().isoformat()}] {message}\n")
     except OSError:
@@ -329,9 +337,14 @@ class WrapperGenerator:
     # rather than burning the full transient-error budget below.
     _MAX_TIMEOUT_RETRIES = 1
     # Hard aggregate ceiling for one logical generation call across ALL its
-    # per-attempt retries and model fail-overs. Without this, 6 timeouts ×
-    # several candidate models stacked into multi-minute "generating" stalls.
-    _GEMINI_TOTAL_BUDGET_S = 180
+    # per-attempt retries and model fail-overs — a runaway backstop, NOT the
+    # primary hang guard (that's the 60s per-attempt timeout + capped
+    # timeout-retries + model failover). It must be generous enough to ride out
+    # legitimate 429 rate-limit backoffs (the server tells us to wait ~30-60s
+    # for the per-minute quota to reset, then the retry succeeds) — too tight a
+    # budget kills a regeneration that was about to work. Daily-quota
+    # exhaustion still surfaces a clear error once retries are spent.
+    _GEMINI_TOTAL_BUDGET_S = 300
 
     # Transient Gemini failures — 503 "the model is overloaded", 429
     # rate-limits, and 5xx server errors — are common and almost always clear
