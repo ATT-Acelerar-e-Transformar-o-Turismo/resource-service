@@ -22,7 +22,22 @@ class Settings(BaseSettings):
 
     # Wrapper Generation
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
-    GEMINI_MODEL_NAME: str = Field(default="gemini-flash-latest", env="GEMINI_MODEL_NAME")
+    # Pin to a SPECIFIC stable model id, not a moving "*-latest" alias: the
+    # alias hot-swaps with ~2 weeks' notice and currently lands on a heavily
+    # contended model that returns 503 "overloaded" and stalls sockets. Pinning
+    # makes the served model deterministic. Override via env per environment /
+    # API-key tier (e.g. a newer flash GA model if available to your project).
+    GEMINI_MODEL_NAME: str = Field(default="gemini-2.5-flash", env="GEMINI_MODEL_NAME")
+    # Comma-separated models to fall back to when the primary is overloaded
+    # (503/UNAVAILABLE) or stalls. Tried in order after the primary fails over,
+    # bounded by the generator's aggregate wall-clock budget. Pick currently
+    # served models — a lighter, less-contended model first, then a "*-latest"
+    # alias as a final hedge so a future model retirement still resolves to
+    # something. (gemini-2.0-flash was REMOVED here — it shut down 2026-06-01.)
+    GEMINI_FALLBACK_MODELS: str = Field(
+        default="gemini-2.5-flash-lite,gemini-flash-latest",
+        env="GEMINI_FALLBACK_MODELS",
+    )
     DATA_RABBITMQ_URL: str = Field(
         default="amqp://user:password@data-mq:5672/", env="DATA_RABBITMQ_URL"
     )

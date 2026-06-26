@@ -102,6 +102,14 @@ class PromptManager:
             periodicity=periodicity,
         )
 
+    def get_file_wrapper(self, source_type: str, periodicity: str = "Daily") -> str:
+        """Render the deterministic CSV/XLSX wrapper (no AI). It reads the
+        time/value columns from source_config at runtime, tags each value
+        column with its name in `series`, and parses numbers robustly
+        (European formats included)."""
+        template = self.env.get_template("file_wrapper.j2")
+        return template.render(source_type=source_type, periodicity=periodicity)
+
     def _get_additional_imports(self, source_type: str) -> str:
         """Get additional imports based on source type"""
         if source_type in ["CSV", "XLSX"]:

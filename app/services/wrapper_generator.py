@@ -14,6 +14,7 @@ import sys
 from typing import Dict, List, Any, Optional
 import requests
 import random
+import contextvars
 import pandas as pd
 from .prompt_manager import PromptManager
 from .wrapper_generation_tools import create_tool_runtime
@@ -27,6 +28,42 @@ except Exception:  # pragma: no cover — defensive
     _GENAI_API_ERROR_TYPE = None
 
 logger = logging.getLogger(__name__)
+
+# --- Per-wrapper generation progress log -----------------------------------
+# The "view logs" modal reads /app/wrapper_logs/{id}_stdout.log — the same file
+# the executing subprocess writes to. During the generation phase there is no
+# subprocess, so we append progress lines here to stream what's happening
+# (model in use, retries, fallbacks, tool calls, validation) instead of a
+# single static "generating" message. Best-effort: never fail generation over
+# a log write.
+WRAPPER_LOGS_DIR = "/app/wrapper_logs"
+
+# Bound the active wrapper_id to the current async task so deep helpers
+# (retry/fallback) can emit progress without threading the id through every
+# call. Set per-generation in generate_wrapper; contextvars are task-local so
+# concurrent generations don't clobber each other.
+_progress_wrapper_id: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "progress_wrapper_id", default=None
+)
+
+
+def append_wrapper_log(wrapper_id: str, message: str, reset: bool = False) -> None:
+    """Append (or, with reset=True, truncate-then-write) a progress line to a
+    wrapper's stdout log file. Shared by the generator and the orchestration
+    service so the logs modal shows a live trail during generation."""
+    if not wrapper_id:
+        return
+    try:
+        os.makedirs(WRAPPER_LOGS_DIR, exist_ok=True)
+        with open(f"{WRAPPER_LOGS_DIR}/{wrapper_id}_stdout.log", "w" if reset else "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] {message}\n")
+    except OSError:
+        pass
+
+
+def _emit_progress(message: str) -> None:
+    """Emit a progress line for whichever wrapper the current task is generating."""
+    append_wrapper_log(_progress_wrapper_id.get(), message)
 
 
 class IndicatorMetadata:
@@ -196,6 +233,7 @@ class WrapperGenerator:
         debug_mode: bool = False,
         debug_dir: str = "prompts",
         model_name: str = "gemini-2.5-flash",
+        fallback_models: Optional[List[str]] = None,
     ):
         """
         Initialize the wrapper generator with Gemini API key and RabbitMQ connection
@@ -210,9 +248,27 @@ class WrapperGenerator:
         self.gemini_api_key = gemini_api_key
         self.rabbitmq_url = rabbitmq_url
         self.debug_logger = DebugLogger(debug_mode, debug_dir)
-        self.client = genai.Client(api_key=gemini_api_key)
+        # Give the transport its own timeout (ms) so a stalled connection can
+        # surface below the per-attempt asyncio.wait_for ceiling. NOTE: some
+        # google-genai versions don't honour this on the async path
+        # (python-genai #911), so it's belt-and-suspenders — the real backstops
+        # are the per-attempt asyncio.wait_for and the aggregate budget below.
+        try:
+            self.client = genai.Client(
+                api_key=gemini_api_key,
+                http_options=types.HttpOptions(timeout=60_000),
+            )
+        except Exception:  # pragma: no cover — SDK without HttpOptions.timeout
+            self.client = genai.Client(api_key=gemini_api_key)
         self.model_name = model_name
+        # Models to fall back to when the primary is overloaded/unavailable.
+        self.fallback_models = fallback_models or []
         self.prompt_manager = PromptManager()
+        logger.info(
+            f"WrapperGenerator using Gemini model '{self.model_name}'"
+            + (f" (fallbacks: {', '.join(self.fallback_models)})"
+               if self.fallback_models else " (no fallbacks)")
+        )
 
     def _build_api_auth_config(self, source_config: DataSourceConfig) -> Dict[str, Any]:
         auth_config: Dict[str, Any] = {}
@@ -263,10 +319,19 @@ class WrapperGenerator:
 
     # Per-attempt ceiling for a single generate_content call. A flash code-gen
     # call returns in well under a minute; anything approaching this is a
-    # stalled connection (the client has no transport-level timeout), so cap it
-    # low enough that a hang is detected and retried promptly instead of leaving
-    # the wrapper sitting in "generating" for minutes per attempt.
-    _GEMINI_CALL_TIMEOUT_S = 120
+    # stalled connection (the client has no reliable transport-level timeout —
+    # and an overloaded gemini-2.5-flash is known to hold the socket open with
+    # no data instead of returning 503, python-genai #1893). Keep it tight so a
+    # hang is detected fast and we fail over instead of sitting in "generating".
+    _GEMINI_CALL_TIMEOUT_S = 60
+    # A hung socket almost never clears on an in-place retry against the SAME
+    # model, so timeouts get a tiny budget and then fall over to the next model,
+    # rather than burning the full transient-error budget below.
+    _MAX_TIMEOUT_RETRIES = 1
+    # Hard aggregate ceiling for one logical generation call across ALL its
+    # per-attempt retries and model fail-overs. Without this, 6 timeouts ×
+    # several candidate models stacked into multi-minute "generating" stalls.
+    _GEMINI_TOTAL_BUDGET_S = 180
 
     # Transient Gemini failures — 503 "the model is overloaded", 429
     # rate-limits, and 5xx server errors — are common and almost always clear
@@ -323,43 +388,95 @@ class WrapperGenerator:
     async def _generate_content_with_retry(
         self, *, timeout: Optional[int] = None, **gen_kwargs
     ):
-        """Wrap client.aio.models.generate_content with a per-attempt timeout
-        and exponential-backoff retry on transient Gemini errors. Raises
-        ValueError on timeout; re-raises the underlying error once retries are
-        exhausted (or immediately for non-transient errors)."""
+        """Generate content, trying the configured model then any fallback
+        models. Each model gets its own per-attempt timeout + backoff retry on
+        transient errors; when one model is exhausted (e.g. a persistent 503
+        overload) we fall over to the next so a single flaky model doesn't
+        block all wrapper generation. Raises the last error only when every
+        candidate model fails."""
+        requested = gen_kwargs.pop("model", None) or self.model_name
+        candidates = [requested] + [
+            m for m in self.fallback_models if m and m != requested
+        ]
+        last_exc: Optional[Exception] = None
+        try:
+            # One hard ceiling for the whole call — across every per-attempt
+            # retry AND every fallback model — so a persistently overloaded /
+            # stalling model can never keep a wrapper in "generating" for
+            # minutes. Cancellation propagates as CancelledError (BaseException,
+            # so the per-candidate `except Exception` below won't swallow it).
+            async with asyncio.timeout(self._GEMINI_TOTAL_BUDGET_S):
+                for idx, model in enumerate(candidates):
+                    try:
+                        return await self._generate_one_model(
+                            model, timeout=timeout, **gen_kwargs
+                        )
+                    except Exception as exc:  # noqa: BLE001 — re-raised after last candidate
+                        last_exc = exc
+                        if idx < len(candidates) - 1:
+                            logger.warning(
+                                f"Gemini model '{model}' failed "
+                                f"({type(exc).__name__}: {exc}); falling back to "
+                                f"'{candidates[idx + 1]}'"
+                            )
+                            _emit_progress(
+                                f"Model '{model}' unavailable — trying "
+                                f"'{candidates[idx + 1]}'…"
+                            )
+                            continue
+                        raise
+        except asyncio.TimeoutError as exc:
+            raise ValueError(
+                f"Gemini generation exceeded the overall "
+                f"{self._GEMINI_TOTAL_BUDGET_S}s budget across "
+                f"{len(candidates)} model(s)"
+            ) from (last_exc or exc)
+        if last_exc:
+            raise last_exc
+
+    async def _generate_one_model(
+        self, model: str, *, timeout: Optional[int] = None, **gen_kwargs
+    ):
+        """Single-model generate with a per-attempt timeout and exponential-
+        backoff retry on transient Gemini errors. Raises ValueError on repeated
+        timeout; re-raises the underlying error once retries are exhausted (or
+        immediately for non-transient errors)."""
         per_attempt_timeout = timeout or self._GEMINI_CALL_TIMEOUT_S
-        attempt = 0
+        attempt = 0          # transient-error (503/429/5xx) retries
+        timeout_attempts = 0  # hung-socket timeout retries (kept small)
         while True:
             try:
                 return await asyncio.wait_for(
-                    self.client.aio.models.generate_content(**gen_kwargs),
+                    self.client.aio.models.generate_content(model=model, **gen_kwargs),
                     timeout=per_attempt_timeout,
                 )
             except asyncio.TimeoutError as exc:
-                # A single hung call shouldn't fail the whole generation — a
-                # stalled connection to the Gemini endpoint almost always clears
-                # on a fresh attempt. Retry with backoff like other transient
-                # errors, only giving up once the retry budget is exhausted.
-                attempt += 1
-                if attempt > self._MAX_GEMINI_RETRIES:
+                # A hung socket rarely clears on an in-place retry against the
+                # SAME model (an overloaded 2.5-flash just keeps stalling), so
+                # timeouts get a tiny budget and then fail over to the next
+                # candidate model instead of burning the full transient budget.
+                timeout_attempts += 1
+                if timeout_attempts > self._MAX_TIMEOUT_RETRIES:
                     raise ValueError(
-                        f"Gemini call timed out after {per_attempt_timeout}s on "
-                        f"every attempt ({self._MAX_GEMINI_RETRIES} retries)"
+                        f"Gemini call to '{model}' timed out after "
+                        f"{per_attempt_timeout}s "
+                        f"({self._MAX_TIMEOUT_RETRIES + 1} attempt(s))"
                     ) from exc
-                backoff = min(
-                    self._BASE_BACKOFF_S * (2 ** (attempt - 1)), self._MAX_BACKOFF_S
-                )
-                delay = backoff + random.uniform(0, backoff * 0.25)  # jitter
+                delay = self._BASE_BACKOFF_S + random.uniform(0, 1.0)  # small jitter
                 logger.warning(
-                    f"Gemini call timed out after {per_attempt_timeout}s; retry "
-                    f"{attempt}/{self._MAX_GEMINI_RETRIES} in {delay:.1f}s"
+                    f"Gemini call to '{model}' timed out after "
+                    f"{per_attempt_timeout}s; retry "
+                    f"{timeout_attempts}/{self._MAX_TIMEOUT_RETRIES} in {delay:.1f}s"
+                )
+                _emit_progress(
+                    f"Gemini ('{model}') timed out — retrying…"
                 )
                 await asyncio.sleep(delay)
             except Exception as exc:  # noqa: BLE001 — re-raised below unless transient
                 if not self._is_transient_gemini_error(exc):
                     raise
                 attempt += 1
-                if attempt > self._MAX_GEMINI_RETRIES:
+                if attempt >= self._MAX_GEMINI_RETRIES:
                     logger.warning(
                         f"Gemini still failing after {self._MAX_GEMINI_RETRIES} "
                         f"retries; giving up ({type(exc).__name__})"
@@ -384,6 +501,10 @@ class WrapperGenerator:
                 logger.warning(
                     f"Gemini transient error ({code}); retry "
                     f"{attempt}/{self._MAX_GEMINI_RETRIES} in {delay:.1f}s"
+                )
+                _emit_progress(
+                    f"Gemini ('{model}') busy ({code}) — retry "
+                    f"{attempt}/{self._MAX_GEMINI_RETRIES} in {delay:.0f}s…"
                 )
                 await asyncio.sleep(delay)
 
@@ -525,6 +646,10 @@ class WrapperGenerator:
 
                 print(
                     f"Tool call {tool_calls_used + 1}/{max_tool_calls}: {function_call.name}({dict(function_call.args or {})})"
+                )
+                _emit_progress(
+                    f"Inspecting source: {function_call.name} "
+                    f"({tool_calls_used + 1}/{max_tool_calls})…"
                 )
                 tool_result = runtime.execute(
                     function_name=function_call.name,
@@ -694,8 +819,13 @@ class WrapperGenerator:
 
         auth_config: Dict[str, Any] = {}
 
+        # Bind this wrapper id so deep helpers (retry/fallback/tool calls) can
+        # stream progress into the per-wrapper log the modal reads.
+        _progress_wrapper_id.set(wrapper_id)
+
         # Get data sample based on source type
         print(f"Extracting sample from {source_type} source...")
+        _emit_progress(f"Reading {source_type} data sample…")
         if source_type == "CSV":
             data_sample = self.get_csv_sample(source_config.location)
         elif source_type == "XLSX":
@@ -729,6 +859,7 @@ class WrapperGenerator:
 
         try:
             print("Calling Gemini...")
+            _emit_progress(f"Asking Gemini ({self.model_name}) to write the wrapper…")
             if source_type == "API":
                 generated_code = await self._call_model_with_tools(
                     prompt=prompt,
@@ -782,6 +913,7 @@ class WrapperGenerator:
                 self.debug_logger.log_error(error_msg, debug_metadata)
                 raise ValueError(error_msg)
 
+            _emit_progress("Validating generated code…")
             lint_error = self._validate_generated_code(generated_code)
 
             self.debug_logger.log_lint_result(
