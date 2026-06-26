@@ -1,0 +1,193 @@
+import asyncio
+import os
+import math
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+import pandas as pd
+from utils import RateLimitHandler, mask_credentials, HistoricalDataFetcher, MessageQueueSender, get_interval_from_periodicity, ContinuousExecutor
+
+
+# --- Robust value/time parsing (deterministic, no AI) ----------------------
+def _to_float(value: Any) -> Optional[float]:
+    """Parse a cell into a float, handling European number formats.
+
+    Accepts "1.234,56" (PT/EU: '.' thousands, ',' decimal), "1,234.56"
+    (EN: ',' thousands, '.' decimal), "1234,56", "1234.56", currency/percent
+    symbols and NBSP/space thousands. Returns None for blanks / non-numbers.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return None if (isinstance(value, float) and math.isnan(value)) else float(value)
+        except (ValueError, TypeError):
+            return None
+    s = str(value).strip()
+    if not s:
+        return None
+    s = s.replace("\xa0", "").replace(" ", "").replace("€", "").replace("%", "").replace("$", "")
+    has_comma = "," in s
+    has_dot = "." in s
+    if has_comma and has_dot:
+        # The right-most separator is the decimal one.
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")  # EU
+        else:
+            s = s.replace(",", "")  # EN thousands
+    elif has_comma:
+        s = s.replace(",", ".")  # decimal comma
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_x(value: Any) -> Optional[str]:
+    """Parse a cell into an ISO-8601 timestamp string. Bare 4-digit years map
+    to YYYY-01-01. Returns None when unparseable."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            if isinstance(value, float) and math.isnan(value):
+                return None
+            iv = int(value)
+            if 1900 <= iv <= 2100 and float(iv) == float(value):
+                return f"{iv:04d}-01-01T00:00:00"
+        except (ValueError, TypeError):
+            pass
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.isdigit() and len(s) == 4:
+        return f"{int(s):04d}-01-01T00:00:00"
+    ts = pd.to_datetime(s, dayfirst=True, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _read_table(file_path: str, source_type: str, sheet_name: Optional[str]) -> "pd.DataFrame":
+    """Read a CSV or XLSX into a DataFrame, sniffing the CSV delimiter."""
+    if source_type == "XLSX":
+        return pd.read_excel(file_path, sheet_name=(sheet_name if sheet_name else 0))
+    # CSV: let pandas sniff the separator (comma vs semicolon — common in PT exports).
+    try:
+        return pd.read_csv(file_path, sep=None, engine="python")
+    except Exception:
+        return pd.read_csv(file_path)
+
+
+class ATTWrapper:
+    def __init__(self, wrapper_id: str, source_config: dict = None, rabbitmq_url: str = None):
+        # CRITICAL: wrapper_id is always a STRING (UUID), never an integer
+        self.wrapper_id = wrapper_id
+        self.rabbitmq_url = rabbitmq_url or os.getenv('AMQP_URL', 'amqp://guest:guest@localhost/')
+        self.source_type = "{{ source_type }}"
+        self.periodicity = "{{ periodicity }}"
+        self.rate_limiter = RateLimitHandler()
+        self.historical_data_fetched = False
+        self.source_config = source_config or {}
+
+        self.headers = dict(self.source_config.get('custom_headers', {}))
+        self.params = dict(self.source_config.get('query_params', {}))
+
+        self.metadata = {
+            "source_type": self.source_type,
+            "periodicity": self.periodicity,
+            "wrapper_version": "deterministic-1.0",
+        }
+
+        self.message_sender = MessageQueueSender(self.wrapper_id, self.rabbitmq_url, self.metadata)
+        self.historical_fetcher = HistoricalDataFetcher(self.wrapper_id, self.get_interval_seconds)
+        self.continuous_executor = ContinuousExecutor(self.wrapper_id, self.get_interval_seconds())
+
+    def get_interval_seconds(self) -> int:
+        return get_interval_from_periodicity(self.periodicity)
+
+    async def fetch_date_range(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
+        # Files are one-shot; no date-range fetching.
+        return []
+
+    async def fetch_external_data(self) -> List[Dict[str, Any]]:
+        """Read the uploaded file and emit one point per (row × value column),
+        tagging each with its column name in `series` so multi-column files
+        render as separate chart lines."""
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Starting data fetch from {self.source_type} source...")
+        cfg = self.source_config
+        file_path = cfg.get('location')
+        if not file_path or not os.path.exists(file_path):
+            raise FileNotFoundError(f"Source file not found: {file_path}")
+
+        df = _read_table(file_path, self.source_type, cfg.get('sheet_name'))
+        df.columns = [str(c).strip() for c in df.columns]
+
+        time_col = cfg.get('time_column')
+        if not time_col or time_col not in df.columns:
+            time_col = df.columns[0] if len(df.columns) else None
+        if time_col is None:
+            raise ValueError("No columns found in the file")
+
+        value_cols = cfg.get('value_columns')
+        if not value_cols:
+            value_cols = [c for c in df.columns if c != time_col]
+
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: time column '{time_col}', value columns {value_cols}")
+
+        points: List[Dict[str, Any]] = []
+        for col in value_cols:
+            if col not in df.columns:
+                print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: column '{col}' not found — skipping")
+                continue
+            col_count = 0
+            for _, row in df.iterrows():
+                x = _parse_x(row.get(time_col))
+                y = _to_float(row.get(col))
+                if x is None or y is None:
+                    continue
+                points.append({"x": x, "y": y, "series": col})
+                col_count += 1
+            print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: column '{col}' → {col_count} points")
+
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Successfully fetched {len(points)} data points across {len(value_cols)} column(s)")
+        return points
+
+    async def send_to_queue(self, data_points: List[Dict[str, Any]]):
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Publishing {len(data_points)} data points to queue...")
+        await self.message_sender.send_to_queue(data_points)
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Successfully published message to queue")
+
+    async def run_once(self):
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Starting data fetch cycle for {self.source_type} source")
+        data_points = await self.fetch_external_data()
+        if data_points:
+            await self.send_to_queue(data_points)
+            print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Completed data fetch cycle successfully")
+        else:
+            print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: No data to send")
+            raise Exception("No data points were fetched from the source")
+
+    async def run_continuous(self):
+        # Files are one-shot; honour the same entry point but just run once.
+        await self.run_once()
+
+
+if __name__ == "__main__":
+    import sys
+    import json
+
+    print(f"[{datetime.now().isoformat()}] Wrapper starting with args: {sys.argv}")
+
+    if len(sys.argv) < 3:
+        raise ValueError("wrapper_id and source_config are required as arguments")
+    wrapper_id = sys.argv[1]
+    try:
+        source_config = json.loads(sys.argv[2])
+    except json.JSONDecodeError:
+        raise ValueError("source_config must be valid JSON")
+
+    wrapper = ATTWrapper(wrapper_id, source_config=source_config)
+    print(f"File source ({wrapper.source_type}) detected - running once")
+    asyncio.run(wrapper.run_once())

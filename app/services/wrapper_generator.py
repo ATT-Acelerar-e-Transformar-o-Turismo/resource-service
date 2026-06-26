@@ -14,6 +14,7 @@ import sys
 from typing import Dict, List, Any, Optional
 import requests
 import random
+import contextvars
 import pandas as pd
 from .prompt_manager import PromptManager
 from .wrapper_generation_tools import create_tool_runtime
@@ -27,6 +28,42 @@ except Exception:  # pragma: no cover — defensive
     _GENAI_API_ERROR_TYPE = None
 
 logger = logging.getLogger(__name__)
+
+# --- Per-wrapper generation progress log -----------------------------------
+# The "view logs" modal reads /app/wrapper_logs/{id}_stdout.log — the same file
+# the executing subprocess writes to. During the generation phase there is no
+# subprocess, so we append progress lines here to stream what's happening
+# (model in use, retries, fallbacks, tool calls, validation) instead of a
+# single static "generating" message. Best-effort: never fail generation over
+# a log write.
+WRAPPER_LOGS_DIR = "/app/wrapper_logs"
+
+# Bound the active wrapper_id to the current async task so deep helpers
+# (retry/fallback) can emit progress without threading the id through every
+# call. Set per-generation in generate_wrapper; contextvars are task-local so
+# concurrent generations don't clobber each other.
+_progress_wrapper_id: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "progress_wrapper_id", default=None
+)
+
+
+def append_wrapper_log(wrapper_id: str, message: str, reset: bool = False) -> None:
+    """Append (or, with reset=True, truncate-then-write) a progress line to a
+    wrapper's stdout log file. Shared by the generator and the orchestration
+    service so the logs modal shows a live trail during generation."""
+    if not wrapper_id:
+        return
+    try:
+        os.makedirs(WRAPPER_LOGS_DIR, exist_ok=True)
+        with open(f"{WRAPPER_LOGS_DIR}/{wrapper_id}_stdout.log", "w" if reset else "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] {message}\n")
+    except OSError:
+        pass
+
+
+def _emit_progress(message: str) -> None:
+    """Emit a progress line for whichever wrapper the current task is generating."""
+    append_wrapper_log(_progress_wrapper_id.get(), message)
 
 
 class IndicatorMetadata:
@@ -382,6 +419,10 @@ class WrapperGenerator:
                                 f"({type(exc).__name__}: {exc}); falling back to "
                                 f"'{candidates[idx + 1]}'"
                             )
+                            _emit_progress(
+                                f"Model '{model}' unavailable — trying "
+                                f"'{candidates[idx + 1]}'…"
+                            )
                             continue
                         raise
         except asyncio.TimeoutError as exc:
@@ -427,6 +468,9 @@ class WrapperGenerator:
                     f"{per_attempt_timeout}s; retry "
                     f"{timeout_attempts}/{self._MAX_TIMEOUT_RETRIES} in {delay:.1f}s"
                 )
+                _emit_progress(
+                    f"Gemini ('{model}') timed out — retrying…"
+                )
                 await asyncio.sleep(delay)
             except Exception as exc:  # noqa: BLE001 — re-raised below unless transient
                 if not self._is_transient_gemini_error(exc):
@@ -457,6 +501,10 @@ class WrapperGenerator:
                 logger.warning(
                     f"Gemini transient error ({code}); retry "
                     f"{attempt}/{self._MAX_GEMINI_RETRIES} in {delay:.1f}s"
+                )
+                _emit_progress(
+                    f"Gemini ('{model}') busy ({code}) — retry "
+                    f"{attempt}/{self._MAX_GEMINI_RETRIES} in {delay:.0f}s…"
                 )
                 await asyncio.sleep(delay)
 
@@ -598,6 +646,10 @@ class WrapperGenerator:
 
                 print(
                     f"Tool call {tool_calls_used + 1}/{max_tool_calls}: {function_call.name}({dict(function_call.args or {})})"
+                )
+                _emit_progress(
+                    f"Inspecting source: {function_call.name} "
+                    f"({tool_calls_used + 1}/{max_tool_calls})…"
                 )
                 tool_result = runtime.execute(
                     function_name=function_call.name,
@@ -767,8 +819,13 @@ class WrapperGenerator:
 
         auth_config: Dict[str, Any] = {}
 
+        # Bind this wrapper id so deep helpers (retry/fallback/tool calls) can
+        # stream progress into the per-wrapper log the modal reads.
+        _progress_wrapper_id.set(wrapper_id)
+
         # Get data sample based on source type
         print(f"Extracting sample from {source_type} source...")
+        _emit_progress(f"Reading {source_type} data sample…")
         if source_type == "CSV":
             data_sample = self.get_csv_sample(source_config.location)
         elif source_type == "XLSX":
@@ -802,6 +859,7 @@ class WrapperGenerator:
 
         try:
             print("Calling Gemini...")
+            _emit_progress(f"Asking Gemini ({self.model_name}) to write the wrapper…")
             if source_type == "API":
                 generated_code = await self._call_model_with_tools(
                     prompt=prompt,
@@ -855,6 +913,7 @@ class WrapperGenerator:
                 self.debug_logger.log_error(error_msg, debug_metadata)
                 raise ValueError(error_msg)
 
+            _emit_progress("Validating generated code…")
             lint_error = self._validate_generated_code(generated_code)
 
             self.debug_logger.log_lint_result(

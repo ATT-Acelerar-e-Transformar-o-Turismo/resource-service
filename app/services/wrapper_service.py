@@ -13,6 +13,7 @@ from services.wrapper_generator import (
     WrapperGenerator,
     IndicatorMetadata,
     DataSourceConfig,
+    append_wrapper_log,
 )
 from services.resource_service import create_resource
 from services.abc.wrapper_runner import WrapperRunner
@@ -29,27 +30,12 @@ from schemas.wrapper import (
 from schemas.resource import ResourceCreate
 from config import settings
 
-WRAPPER_LOGS_DIR = "/app/wrapper_logs"
-
-
+# Orchestration-side milestones go to the same per-wrapper log file the
+# generator streams detailed progress into (model in use, retries, fallbacks,
+# tool calls), so the "view logs" modal shows one continuous trail during
+# generation. Delegates to the shared writer in wrapper_generator.
 def _append_generation_log(wrapper_id: str, message: str, reset: bool = False) -> None:
-    """Append a progress line to the wrapper's stdout log file.
-
-    During the generation phase the executing subprocess doesn't exist yet, so
-    its log file is empty and the logs modal just shows "waiting for logs".
-    Writing milestones here (code generation start/finish, failures) gives the
-    user visible progress that then flows seamlessly into the subprocess's own
-    logs once execution begins. Best-effort: never fail generation over a log
-    write. `reset=True` truncates first so a regeneration starts with a clean
-    log instead of stacking onto the previous run's output.
-    """
-    try:
-        os.makedirs(WRAPPER_LOGS_DIR, exist_ok=True)
-        mode = "w" if reset else "a"
-        with open(f"{WRAPPER_LOGS_DIR}/{wrapper_id}_stdout.log", mode) as f:
-            f.write(f"[{datetime.utcnow().isoformat()}] {message}\n")
-    except OSError:
-        pass
+    append_wrapper_log(wrapper_id, message, reset=reset)
 
 
 # Gemini / google.genai error translation. Imported optionally so the service
@@ -343,18 +329,36 @@ class WrapperService:
                     )
 
             await self._update_wrapper_status(wrapper_id, WrapperStatus.GENERATING)
-            _append_generation_log(
-                wrapper_id,
-                "Generating wrapper code with AI… this can take up to a minute.",
-                reset=True,
-            )
 
-            generated_code = await self.generator.generate_wrapper(
-                wrapper.metadata,
-                wrapper.source_config,
-                wrapper.source_type.value,
-                wrapper_id,
-            )
+            # CSV/XLSX wrappers are built deterministically (no AI): the wizard
+            # already supplies the time + value columns, and the template tags
+            # every value column with its name in `series` and parses numbers
+            # robustly. This removes the whole class of AI data bugs (CSV read
+            # as XLSX, multi-column points merged into one line, mis-parsed
+            # European numbers) and is instant/immune to Gemini outages. Only
+            # API sources still need AI (endpoint shape discovery).
+            if wrapper.source_type in (SourceType.CSV, SourceType.XLSX):
+                _append_generation_log(
+                    wrapper_id,
+                    f"Building {wrapper.source_type.value} wrapper (deterministic, no AI)…",
+                    reset=True,
+                )
+                generated_code = self.generator.prompt_manager.get_file_wrapper(
+                    wrapper.source_type.value,
+                    wrapper.metadata.periodicity,
+                )
+            else:
+                _append_generation_log(
+                    wrapper_id,
+                    "Generating wrapper code with AI… this can take up to a minute.",
+                    reset=True,
+                )
+                generated_code = await self.generator.generate_wrapper(
+                    wrapper.metadata,
+                    wrapper.source_config,
+                    wrapper.source_type.value,
+                    wrapper_id,
+                )
 
             await db.generated_wrappers.update_one(
                 {"wrapper_id": wrapper_id},
@@ -580,6 +584,24 @@ class WrapperService:
             except (OperationFailure, ConnectionError) as e:
                 logger.warning(
                     f"Could not clear resource data for {resource_id}: {e}"
+                )
+            # Tell indicator-service to purge its own copy of this resource's
+            # data (data_segments + caches) BEFORE the new run ingests, but
+            # keep the resource linked (reset=True). Otherwise the old points
+            # linger there and the indicator chart keeps showing stale data
+            # even though resource-service's data was cleared.
+            try:
+                await rabbitmq_client.publish(
+                    settings.RESOURCE_DELETED_QUEUE,
+                    json.dumps({
+                        "resource_id": resource_id,
+                        "wrapper_id": wrapper_id,
+                        "reset": True,
+                    }),
+                )
+            except (OperationFailure, ConnectionError) as e:
+                logger.warning(
+                    f"Could not signal indicator-service to reset {resource_id}: {e}"
                 )
             try:
                 await db.resources.update_one(
