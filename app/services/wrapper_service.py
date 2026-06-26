@@ -29,6 +29,29 @@ from schemas.wrapper import (
 from schemas.resource import ResourceCreate
 from config import settings
 
+WRAPPER_LOGS_DIR = "/app/wrapper_logs"
+
+
+def _append_generation_log(wrapper_id: str, message: str, reset: bool = False) -> None:
+    """Append a progress line to the wrapper's stdout log file.
+
+    During the generation phase the executing subprocess doesn't exist yet, so
+    its log file is empty and the logs modal just shows "waiting for logs".
+    Writing milestones here (code generation start/finish, failures) gives the
+    user visible progress that then flows seamlessly into the subprocess's own
+    logs once execution begins. Best-effort: never fail generation over a log
+    write. `reset=True` truncates first so a regeneration starts with a clean
+    log instead of stacking onto the previous run's output.
+    """
+    try:
+        os.makedirs(WRAPPER_LOGS_DIR, exist_ok=True)
+        mode = "w" if reset else "a"
+        with open(f"{WRAPPER_LOGS_DIR}/{wrapper_id}_stdout.log", mode) as f:
+            f.write(f"[{datetime.utcnow().isoformat()}] {message}\n")
+    except OSError:
+        pass
+
+
 # Gemini / google.genai error translation. Imported optionally so the service
 # still boots if the SDK moves things around in a future version.
 try:
@@ -292,7 +315,39 @@ class WrapperService:
 
             wrapper = GeneratedWrapper(**wrapper_doc)
 
+            # Safeguard: a file upload can carry the wrong source_type (e.g. a
+            # .csv generated while the wizard's type dropdown said XLSX), which
+            # makes the generated wrapper read it with the wrong pandas reader
+            # (pd.read_excel on a CSV → "Excel file format cannot be
+            # determined"). Trust the actual file extension and correct both the
+            # in-memory wrapper and the stored doc so regeneration self-heals.
+            if wrapper.source_type in (SourceType.CSV, SourceType.XLSX):
+                location = getattr(wrapper.source_config, "location", "") or ""
+                ext = os.path.splitext(location)[1].lower()
+                corrected = (
+                    SourceType.CSV if ext == ".csv"
+                    else SourceType.XLSX if ext in (".xlsx", ".xls")
+                    else None
+                )
+                if corrected and corrected != wrapper.source_type:
+                    logger.info(
+                        f"Correcting wrapper {wrapper_id} source_type "
+                        f"{wrapper.source_type.value} -> {corrected.value} "
+                        f"(file extension {ext})"
+                    )
+                    wrapper.source_type = corrected
+                    await db.generated_wrappers.update_one(
+                        {"wrapper_id": wrapper_id},
+                        {"$set": {"source_type": corrected.value,
+                                  "updated_at": datetime.utcnow()}},
+                    )
+
             await self._update_wrapper_status(wrapper_id, WrapperStatus.GENERATING)
+            _append_generation_log(
+                wrapper_id,
+                "Generating wrapper code with AI… this can take up to a minute.",
+                reset=True,
+            )
 
             generated_code = await self.generator.generate_wrapper(
                 wrapper.metadata,
@@ -311,6 +366,9 @@ class WrapperService:
                 },
             )
             logger.info(f"Generated code for wrapper {wrapper_id}")
+            _append_generation_log(
+                wrapper_id, "Wrapper code generated. Starting execution…"
+            )
 
             wrapper_file_path = self.generator.save_wrapper(generated_code, wrapper_id)
             logger.info(f"Saved wrapper code to file: {wrapper_file_path}")
@@ -424,6 +482,7 @@ class WrapperService:
             )
             friendly = _translate_genai_error(e)
             error_message = friendly or f"{type(e).__name__}: {e}"
+            _append_generation_log(wrapper_id, f"Generation failed: {error_message}")
             await self._update_wrapper_status(
                 wrapper_id,
                 WrapperStatus.ERROR,
@@ -1037,6 +1096,9 @@ def create_wrapper_service() -> WrapperService:
         debug_mode=settings.WRAPPER_GENERATION_DEBUG_MODE,
         debug_dir="/app/prompts",
         model_name=settings.GEMINI_MODEL_NAME,
+        fallback_models=[
+            m.strip() for m in settings.GEMINI_FALLBACK_MODELS.split(",") if m.strip()
+        ],
     )
 
     return WrapperService(runner=runner, generator=generator)
