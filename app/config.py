@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     RESOURCE_DELETED_QUEUE: str = Field(
         default="resource_deleted", env="RESOURCE_DELETED_QUEUE"
     )
+    # Consumed from indicator-service: when an indicator is deleted, stop the
+    # wrappers of its now-orphaned resources so they don't keep running.
+    INDICATOR_DELETED_QUEUE: str = Field(
+        default="indicator_deleted", env="INDICATOR_DELETED_QUEUE"
+    )
     WRAPPER_TRANSLATIONS_QUEUE: str = Field(
         default="wrapper_translations", env="WRAPPER_TRANSLATIONS_QUEUE"
     )
