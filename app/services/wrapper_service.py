@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from typing import Optional, Dict, Any
 from bson.objectid import ObjectId
+from bson.errors import InvalidId
 from pymongo.errors import OperationFailure
 from dependencies.database import db
 from dependencies.rabbitmq import consumer, rabbitmq_client
@@ -1152,3 +1153,39 @@ async def process_wrapper_creation_message(
         except (OperationFailure, ConnectionError, TimeoutError) as e:
             logger.error(f"Database/Connection error processing wrapper creation: {e}")
             raise
+
+
+@consumer(settings.INDICATOR_DELETED_QUEUE)
+async def process_indicator_deleted_message(
+    message: aio_pika.abc.AbstractIncomingMessage,
+):
+    """When an indicator is deleted, stop the wrappers of its now-orphaned
+    resources so their continuous API wrappers don't keep running forever and
+    clogging the ingest pipeline."""
+    async with message.process():
+        try:
+            data = json.loads(message.body.decode())
+            resource_ids = data.get("resource_ids", []) or []
+            stopped = 0
+            for rid in resource_ids:
+                try:
+                    resource = await db.resources.find_one({"_id": ObjectId(rid)})
+                except (InvalidId, TypeError):
+                    continue
+                wrapper_id = resource.get("wrapper_id") if resource else None
+                if not wrapper_id:
+                    continue
+                try:
+                    ok = await wrapper_service.stop_wrapper_execution(wrapper_id)
+                    if ok:
+                        stopped += 1
+                except Exception as e:  # noqa: BLE001 — keep going for the rest
+                    logger.warning(
+                        f"Failed to stop orphaned wrapper {wrapper_id}: {e}"
+                    )
+            logger.info(
+                f"Indicator {data.get('indicator_id')} deleted — stopped "
+                f"{stopped}/{len(resource_ids)} orphaned wrapper(s)"
+            )
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Invalid message in indicator-deleted queue: {e}")
