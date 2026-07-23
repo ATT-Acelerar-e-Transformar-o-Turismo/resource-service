@@ -31,16 +31,28 @@ class Settings(BaseSettings):
     # alias hot-swaps with ~2 weeks' notice and currently lands on a heavily
     # contended model that returns 503 "overloaded" and stalls sockets. Pinning
     # makes the served model deterministic. Override via env per environment /
-    # API-key tier (e.g. a newer flash GA model if available to your project).
-    GEMINI_MODEL_NAME: str = Field(default="gemini-2.5-flash", env="GEMINI_MODEL_NAME")
-    # Comma-separated models to fall back to when the primary is overloaded
-    # (503/UNAVAILABLE) or stalls. Tried in order after the primary fails over,
-    # bounded by the generator's aggregate wall-clock budget. Pick currently
-    # served models — a lighter, less-contended model first, then a "*-latest"
-    # alias as a final hedge so a future model retirement still resolves to
-    # something. (gemini-2.0-flash was REMOVED here — it shut down 2026-06-01.)
+    # API-key tier.
+    # IMPORTANT (observed 2026-06-29 on the prod "Wrapper-Generator" project):
+    # even on a paid Tier-1 project, the OLDER models gemini-2.5-flash /
+    # gemini-2.5-flash-lite are still capped at the *free-tier* 20 requests/day,
+    # while gemini-3.5-flash gets the real paid limits (1000 req/min). So the
+    # primary must be a 3.x model to actually benefit from Tier-1 billing —
+    # pinning 2.5-flash silently caps generation at ~1 wrapper/day.
+    GEMINI_MODEL_NAME: str = Field(default="gemini-3.5-flash", env="GEMINI_MODEL_NAME")
+    # Comma-separated models to fall back to when the primary is rate-limited
+    # (429) or overloaded (503/UNAVAILABLE). Tried in order after the primary,
+    # bounded by the generator's aggregate wall-clock budget. On the free tier
+    # each DISTINCT model has its own per-day quota bucket (~20 req/day), so more
+    # distinct models = more daily headroom; the generator now fails over to the
+    # next model immediately on a 429 and skips any model that already hit its
+    # daily cap this generation. NOTE: "*-latest" aliases resolve to a concrete
+    # model and SHARE its bucket — they add resilience to retirements, not quota,
+    # so prefer distinct concrete ids here. Order: lighter/cheaper first, then a
+    # heavier model (pro) as a last resort, then a "*-latest" hedge. Override per
+    # environment via the GEMINI_FALLBACK_MODELS env var (no rebuild needed).
+    # (gemini-2.0-flash was REMOVED — it shut down 2026-06-01.)
     GEMINI_FALLBACK_MODELS: str = Field(
-        default="gemini-2.5-flash-lite,gemini-flash-latest",
+        default="gemini-3.5-flash-lite,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-flash-latest",
         env="GEMINI_FALLBACK_MODELS",
     )
     DATA_RABBITMQ_URL: str = Field(
@@ -55,6 +67,12 @@ class Settings(BaseSettings):
     WRAPPER_GENERATION_DEBUG_MODE: bool = Field(
         default=False, env="WRAPPER_GENERATION_DEBUG_MODE"
     )
+
+    # Max Gemini tool-calling iterations when generating an API wrapper. Each
+    # iteration is a billed Gemini request, so this is the dominant cost knob:
+    # 15 burned ~16 calls per generation; 4 is plenty for the model to inspect a
+    # typical endpoint (1-2 fetches) and cuts cost per AI generation ~3-4x.
+    WRAPPER_MAX_TOOL_CALLS: int = Field(default=4, env="WRAPPER_MAX_TOOL_CALLS")
 
     # Max concurrent wrapper subprocesses. Each uses ~20MB; the ceiling
     # prevents a burst from OOM-killing the service.

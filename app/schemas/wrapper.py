@@ -100,6 +100,12 @@ class APISourceConfig(BaseModel):
     username: Optional[str] = Field(None, description="Username for basic auth")
     password: Optional[str] = Field(None, description="Password for basic auth")
     timeout_seconds: int = Field(default=30, description="Request timeout in seconds")
+    data_path: Optional[str] = Field(
+        None,
+        description="Dotted path to the records array in the JSON response "
+        "(e.g. 'data'); '' means the response is itself the array. Auto-detected "
+        "by the generation-time probe when omitted.",
+    )
     date_field: Optional[str] = Field(
         None, description="Field name for date/timestamp in API response"
     )

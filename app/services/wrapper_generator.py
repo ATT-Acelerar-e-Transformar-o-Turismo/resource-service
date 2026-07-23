@@ -46,6 +46,31 @@ _progress_wrapper_id: "contextvars.ContextVar[Optional[str]]" = contextvars.Cont
     "progress_wrapper_id", default=None
 )
 
+# Sticky model selection within a single generation. A wrapper generation makes
+# MANY Gemini calls (one per tool-calling iteration, up to ~15, then a final
+# call). Each used to restart from the configured primary model — so once the
+# primary's per-model daily quota was exhausted (429), every iteration paid the
+# failover dance again and kept bouncing back to the dead model. These task-local
+# vars make the choice sticky: skip models known-exhausted this generation, and
+# try the last model that worked first. Set/reset per-generation in
+# generate_wrapper; task-local so concurrent generations don't clobber each other.
+_preferred_model: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "preferred_model", default=None
+)
+_exhausted_models: "contextvars.ContextVar[Optional[set]]" = contextvars.ContextVar(
+    "exhausted_models", default=None
+)
+
+
+def reset_model_selection_state() -> None:
+    """Reset the per-generation sticky-model contextvars (no preferred model,
+    nothing exhausted). Call once at the start of handling each wrapper message
+    so model-exhaustion / preferred-model state never leaks across wrappers —
+    including into paths that skip generate_wrapper (e.g. the deterministic
+    CSV/XLSX branch and its translation sidecar)."""
+    _preferred_model.set(None)
+    _exhausted_models.set(set())
+
 
 def append_wrapper_log(wrapper_id: str, message: str, reset: bool = False) -> None:
     """Append (or, with reset=True, truncate-then-write) a progress line to a
@@ -242,6 +267,7 @@ class WrapperGenerator:
         debug_dir: str = "prompts",
         model_name: str = "gemini-2.5-flash",
         fallback_models: Optional[List[str]] = None,
+        max_tool_calls: int = 4,
     ):
         """
         Initialize the wrapper generator with Gemini API key and RabbitMQ connection
@@ -255,6 +281,7 @@ class WrapperGenerator:
         """
         self.gemini_api_key = gemini_api_key
         self.rabbitmq_url = rabbitmq_url
+        self.max_tool_calls = max_tool_calls
         self.debug_logger = DebugLogger(debug_mode, debug_dir)
         # Give the transport its own timeout (ms) so a stalled connection can
         # surface below the per-attempt asyncio.wait_for ceiling. NOTE: some
@@ -377,6 +404,22 @@ class WrapperGenerator:
         status = (getattr(exc, "status", None) or "").upper()
         return code in cls._RETRYABLE_CODES or status in cls._RETRYABLE_STATUSES
 
+    @classmethod
+    def _is_usage_error(cls, exc: Exception) -> bool:
+        """True if exc is a quota / rate-limit (429 / RESOURCE_EXHAUSTED) error.
+
+        These are per-model on Gemini's free tier: the model we just called is
+        rate-limited, but a *different* model has its own bucket and may answer
+        immediately. So when another candidate is available we fail over at once
+        instead of sleeping out this model's backoff (which can be 60-70s)."""
+        if cls._GENAI_API_ERROR is not None and not isinstance(
+            exc, cls._GENAI_API_ERROR
+        ):
+            return False
+        code = getattr(exc, "code", None)
+        status = (getattr(exc, "status", None) or "").upper()
+        return code == 429 or status == "RESOURCE_EXHAUSTED"
+
     @staticmethod
     def _gemini_retry_delay_s(exc: Exception) -> Optional[float]:
         """Extract the server-suggested retry delay (seconds) from a genai
@@ -408,9 +451,23 @@ class WrapperGenerator:
         block all wrapper generation. Raises the last error only when every
         candidate model fails."""
         requested = gen_kwargs.pop("model", None) or self.model_name
-        candidates = [requested] + [
-            m for m in self.fallback_models if m and m != requested
-        ]
+        # Build the candidate order, made sticky across the generation:
+        #   1. the model that last worked this generation (preferred), then
+        #   2. the requested/primary model, then
+        #   3. the configured fallbacks,
+        # with any model that already hit its daily quota (429) this generation
+        # dropped entirely — retrying it just wastes the budget until tomorrow.
+        preferred = _preferred_model.get()
+        exhausted = _exhausted_models.get() or set()
+        ordered = ([preferred] if preferred else []) + [requested] + list(self.fallback_models)
+        candidates = []
+        for m in ordered:
+            if m and m not in candidates and m not in exhausted:
+                candidates.append(m)
+        if not candidates:
+            # Everything is daily-exhausted; try the requested model anyway so
+            # the caller gets a real 429 to surface rather than an empty loop.
+            candidates = [requested]
         last_exc: Optional[Exception] = None
         try:
             # One hard ceiling for the whole call — across every per-attempt
@@ -421,11 +478,24 @@ class WrapperGenerator:
             async with asyncio.timeout(self._GEMINI_TOTAL_BUDGET_S):
                 for idx, model in enumerate(candidates):
                     try:
-                        return await self._generate_one_model(
-                            model, timeout=timeout, **gen_kwargs
+                        result = await self._generate_one_model(
+                            model,
+                            timeout=timeout,
+                            can_failover=idx < len(candidates) - 1,
+                            **gen_kwargs,
                         )
+                        # Remember the winner so the next call this generation
+                        # (e.g. the next tool-calling iteration) starts here
+                        # instead of restarting from the exhausted primary.
+                        _preferred_model.set(model)
+                        return result
                     except Exception as exc:  # noqa: BLE001 — re-raised after last candidate
                         last_exc = exc
+                        # A daily-quota 429 won't recover this generation — mark
+                        # the model exhausted so later calls skip it outright.
+                        if self._is_usage_error(exc):
+                            exhausted = (_exhausted_models.get() or set()) | {model}
+                            _exhausted_models.set(exhausted)
                         if idx < len(candidates) - 1:
                             logger.warning(
                                 f"Gemini model '{model}' failed "
@@ -448,12 +518,22 @@ class WrapperGenerator:
             raise last_exc
 
     async def _generate_one_model(
-        self, model: str, *, timeout: Optional[int] = None, **gen_kwargs
+        self,
+        model: str,
+        *,
+        timeout: Optional[int] = None,
+        can_failover: bool = False,
+        **gen_kwargs,
     ):
         """Single-model generate with a per-attempt timeout and exponential-
         backoff retry on transient Gemini errors. Raises ValueError on repeated
         timeout; re-raises the underlying error once retries are exhausted (or
-        immediately for non-transient errors)."""
+        immediately for non-transient errors).
+
+        When `can_failover` is True (another candidate model is queued behind
+        this one), a quota / rate-limit (429) error re-raises *immediately*
+        instead of backing off — the next model has its own quota bucket and is
+        the faster path to success than waiting out this model's reset."""
         per_attempt_timeout = timeout or self._GEMINI_CALL_TIMEOUT_S
         attempt = 0          # transient-error (503/429/5xx) retries
         timeout_attempts = 0  # hung-socket timeout retries (kept small)
@@ -487,6 +567,21 @@ class WrapperGenerator:
                 await asyncio.sleep(delay)
             except Exception as exc:  # noqa: BLE001 — re-raised below unless transient
                 if not self._is_transient_gemini_error(exc):
+                    raise
+                # Quota / rate-limit (429): the model we just hit is throttled
+                # (often the per-model *daily* cap, which won't reset today). If
+                # another candidate model is queued, don't sleep out this one's
+                # backoff — re-raise now so the caller fails over immediately to
+                # a model with its own quota bucket.
+                if can_failover and self._is_usage_error(exc):
+                    code = getattr(exc, "code", None) or getattr(exc, "status", "?")
+                    logger.warning(
+                        f"Gemini '{model}' rate-limited ({code}); failing over "
+                        f"to the next model immediately (no backoff)"
+                    )
+                    _emit_progress(
+                        f"Gemini ('{model}') rate-limited ({code}) — switching model…"
+                    )
                     raise
                 attempt += 1
                 if attempt >= self._MAX_GEMINI_RETRIES:
@@ -597,7 +692,7 @@ class WrapperGenerator:
         self,
         prompt: str,
         auth_config: Dict[str, Any],
-        max_tool_calls: int = 15,
+        max_tool_calls: int = 4,
         max_chars: int = 2500,
         wrapper_id: str = None,
     ) -> str:
@@ -835,6 +930,8 @@ class WrapperGenerator:
         # Bind this wrapper id so deep helpers (retry/fallback/tool calls) can
         # stream progress into the per-wrapper log the modal reads.
         _progress_wrapper_id.set(wrapper_id)
+        # Start this generation's sticky-model state fresh.
+        reset_model_selection_state()
 
         # Get data sample based on source type
         print(f"Extracting sample from {source_type} source...")
@@ -877,7 +974,7 @@ class WrapperGenerator:
                 generated_code = await self._call_model_with_tools(
                     prompt=prompt,
                     auth_config=auth_config,
-                    max_tool_calls=15,
+                    max_tool_calls=self.max_tool_calls,
                     max_chars=2500,
                     wrapper_id=wrapper_id,
                 )

@@ -110,6 +110,16 @@ class PromptManager:
         template = self.env.get_template("file_wrapper.j2")
         return template.render(source_type=source_type, periodicity=periodicity)
 
+    def get_api_wrapper(self, periodicity: str = "Daily") -> str:
+        """Render the deterministic API wrapper (no AI). It fetches the
+        endpoint, extracts the records array and the date/value fields from
+        source_config (resolved by the generation-time probe, or re-detected at
+        runtime), and emits points at FULL timestamp precision so intraday
+        readings don't collapse onto one x. Used for simple JSON APIs; complex
+        endpoints still fall back to AI generation."""
+        template = self.env.get_template("api_wrapper.j2")
+        return template.render(periodicity=periodicity)
+
     def _get_additional_imports(self, source_type: str) -> str:
         """Get additional imports based on source type"""
         if source_type in ["CSV", "XLSX"]:

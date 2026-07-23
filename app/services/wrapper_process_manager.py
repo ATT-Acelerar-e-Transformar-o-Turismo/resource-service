@@ -215,7 +215,8 @@ class WrapperProcessManager:
                     # Append exit information to log files (never delete logs!)
                     await self._append_exit_info_to_logs(wrapper_id, exit_code)
 
-                    if exit_code == 0:
+                    if exit_code == 0 and not wrapper_process.continuous:
+                        # One-shot (file) wrapper finished its single run.
                         await db.generated_wrappers.update_one(
                             {"wrapper_id": wrapper_id},
                             {
@@ -226,6 +227,14 @@ class WrapperProcessManager:
                             },
                         )
                     else:
+                        # Either a non-zero crash OR a continuous (API) wrapper
+                        # that exited cleanly. A continuous wrapper is supposed
+                        # to loop forever, so a clean exit means its code
+                        # returned early (e.g. ran once instead of looping) — NOT
+                        # "completed". Route both through the crash handler so it
+                        # auto-retries and, if it keeps exiting, surfaces as
+                        # ERROR instead of a misleading COMPLETED that silently
+                        # stops data collection.
                         await self._handle_crashed_wrapper(wrapper_id, exit_code)
 
                 else:
@@ -284,17 +293,46 @@ class WrapperProcessManager:
             await self._cleanup_process(wrapper_id)
 
     async def _handle_crashed_wrapper(self, wrapper_id: str, exit_code: int):
-        """Check if a crashed wrapper should be auto-retried or marked as error."""
+        """Check if a crashed (or unexpectedly-exited) wrapper should be
+        auto-retried or marked as error. exit_code 0 reaches here only for a
+        continuous wrapper that exited when it should have kept running."""
         max_retries = 3
+        # A clean exit (0) from a wrapper that reached here is a continuous
+        # wrapper that stopped when it shouldn't have — describe it as such
+        # rather than "crashed", which only fits a non-zero exit.
+        how = "exited unexpectedly" if exit_code == 0 else "crashed"
         try:
+            # Guard against a stop/regenerate race. Between the health-check
+            # snapshot and here there are awaits, during which the user may have
+            # deliberately stopped or regenerated this wrapper — both call
+            # _cleanup_process (removing it from running_processes) and move it to
+            # a non-running status. Auto-retrying then would resurrect a wrapper
+            # the user just stopped (or duplicate a fresh regenerate run). If
+            # it's no longer tracked, leave it alone.
+            if wrapper_id not in self.running_processes:
+                logger.info(
+                    f"Wrapper {wrapper_id} no longer tracked "
+                    f"(stopped/regenerated during exit handling); skipping auto-retry"
+                )
+                return
+
             wrapper_doc = await db.generated_wrappers.find_one(
                 {"wrapper_id": wrapper_id}
             )
+            # Likewise skip if it was moved to an intentional/terminal status.
+            current_status = (wrapper_doc or {}).get("status")
+            if current_status in ("stopped", "pending", "generating",
+                                  "creating_resource", "completed"):
+                logger.info(
+                    f"Wrapper {wrapper_id} status={current_status}; "
+                    f"not auto-retrying (intentional state)"
+                )
+                return
             retry_count = (wrapper_doc or {}).get("retry_count", 0)
 
             if retry_count < max_retries:
                 logger.info(
-                    f"Wrapper {wrapper_id} crashed (exit {exit_code}), "
+                    f"Wrapper {wrapper_id} {how} (exit {exit_code}), "
                     f"scheduling auto-retry {retry_count + 1}/{max_retries}"
                 )
                 await db.generated_wrappers.update_one(
@@ -302,7 +340,7 @@ class WrapperProcessManager:
                     {
                         "$set": {"status": "retrying"},
                         "$push": {
-                            "execution_log": f"Crash at {datetime.utcnow()} (exit {exit_code}), auto-retry scheduled"
+                            "execution_log": f"Wrapper {how} at {datetime.utcnow()} (exit {exit_code}), auto-retry scheduled"
                         },
                     },
                 )
@@ -313,7 +351,7 @@ class WrapperProcessManager:
                 asyncio.create_task(wrapper_service.retry_failed_wrapper(wrapper_id))
             else:
                 logger.warning(
-                    f"Wrapper {wrapper_id} crashed (exit {exit_code}), "
+                    f"Wrapper {wrapper_id} {how} (exit {exit_code}), "
                     f"retries exhausted ({max_retries}/{max_retries})"
                 )
                 await db.generated_wrappers.update_one(

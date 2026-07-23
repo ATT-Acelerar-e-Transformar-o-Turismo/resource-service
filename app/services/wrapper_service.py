@@ -15,6 +15,7 @@ from services.wrapper_generator import (
     IndicatorMetadata,
     DataSourceConfig,
     append_wrapper_log,
+    reset_model_selection_state,
 )
 from services.resource_service import create_resource
 from services.abc.wrapper_runner import WrapperRunner
@@ -37,6 +38,106 @@ from config import settings
 # generation. Delegates to the shared writer in wrapper_generator.
 def _append_generation_log(wrapper_id: str, message: str, reset: bool = False) -> None:
     append_wrapper_log(wrapper_id, message, reset=reset)
+
+
+# API auto-detection: fetch the endpoint once at generation time and see whether
+# its response is a flat list of records with a parseable date field and a
+# numeric value field. If so we wrap it DETERMINISTICALLY (no Gemini) — which
+# removes the whole class of AI-generated API bugs (timestamps collapsed to a
+# day, empty date/value fields dropping all data, run_once instead of looping)
+# AND costs zero Gemini credits. Complex endpoints still fall back to AI.
+import time as _time  # noqa: E402
+import requests  # noqa: E402  (kept beside the probe it supports)
+from wrapper_runtime.shared.api_extract import detect_mapping  # noqa: E402
+
+# Sentinel: the probe couldn't read the endpoint because the SOURCE API is
+# rate-limiting us (429) — that's a "slow down", not "this shape needs AI". So
+# build the deterministic wrapper anyway and let it detect the fields at runtime
+# (the wrapper has its own 429 backoff). Crucially this avoids falling back to
+# Gemini, which both costs credits and would hit the same source-API 429.
+_PROBE_DEFER = "DEFER"
+
+
+async def _probe_api_source(source_config):
+    """Fetch the API endpoint and auto-detect {data_path, date_field,
+    value_field}.
+
+    Returns:
+      * dict mapping  — simple flat JSON detected; wrap deterministically.
+      * _PROBE_DEFER  — endpoint reachable but rate-limiting (429); wrap
+                        deterministically and detect at runtime (no AI, no credits).
+      * None          — genuinely undetectable (non-JSON / 4xx / error); use AI.
+    Never raises."""
+    try:
+        cfg = source_config.model_dump() if hasattr(source_config, "model_dump") else dict(source_config)
+    except (TypeError, ValueError):
+        return None
+    url = cfg.get("location")
+    if not url:
+        return None
+
+    headers = dict(cfg.get("custom_headers") or {})
+    auth_type = (cfg.get("auth_type") or "none").lower()
+    if auth_type == "api_key" and cfg.get("api_key"):
+        headers[cfg.get("api_key_header") or "X-API-Key"] = cfg["api_key"]
+    elif auth_type == "bearer" and cfg.get("bearer_token"):
+        headers["Authorization"] = f"Bearer {cfg['bearer_token']}"
+    auth = None
+    if auth_type == "basic" and cfg.get("username"):
+        auth = (cfg.get("username"), cfg.get("password") or "")
+    params = dict(cfg.get("query_params") or {})
+    try:
+        timeout = min(int(cfg.get("timeout_seconds") or 30), 25)
+    except (TypeError, ValueError):
+        timeout = 25
+
+    # Returns the parsed JSON, or raises. On a 429 from the source API it
+    # retries (honouring Retry-After, capped) instead of giving up — the sensor
+    # throttles under load. If still 429 after a few tries, raises a marker.
+    class _RateLimited(Exception):
+        pass
+
+    def _do_request():
+        attempts = 0
+        while True:
+            attempts += 1
+            resp = requests.get(url, headers=headers, params=params, auth=auth, timeout=timeout)
+            if resp.status_code == 429:
+                if attempts > 3:
+                    raise _RateLimited()
+                ra = resp.headers.get("retry-after")
+                try:
+                    delay = float(ra) if ra else 5.0 * attempts
+                except ValueError:
+                    delay = 5.0 * attempts
+                _time.sleep(min(delay, 25))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+
+    try:
+        payload = await asyncio.to_thread(_do_request)
+    except _RateLimited:
+        logger.info(
+            "API probe: source endpoint is rate-limiting (429) after retries; "
+            "building deterministic wrapper with runtime field detection (no AI)"
+        )
+        return _PROBE_DEFER
+    except Exception as e:  # network / non-JSON / HTTP error → fall back to AI
+        # Exception text may embed the full URL (query params can carry API
+        # keys) — log only the exception type.
+        logger.info(f"API probe request failed ({type(e).__name__}); will use AI generation")
+        return None
+    try:
+        return detect_mapping(
+            payload,
+            preferred_path=cfg.get("data_path"),
+            date_field=cfg.get("date_field"),
+            value_field=cfg.get("value_field"),
+        )
+    except Exception as e:
+        logger.info(f"API auto-detection failed ({type(e).__name__}); will use AI generation")
+        return None
 
 
 # Gemini / google.genai error translation. Imported optionally so the service
@@ -188,10 +289,23 @@ class WrapperService:
             result = await self._runner.execute_wrapper(wrapper)
 
             if result.success:
+                # The process runner returns success as soon as the subprocess
+                # STARTS, not when it finishes. An API wrapper runs continuously,
+                # so it must stay EXECUTING — only one-shot file wrappers settle
+                # on COMPLETED. (Mirrors the creation path; without this an admin
+                # /execute on an API wrapper wrongly flips it to "completed".)
+                success_status = (
+                    WrapperStatus.EXECUTING
+                    if wrapper.source_type == SourceType.API
+                    else WrapperStatus.COMPLETED
+                )
+                set_fields = {"status": success_status.value}
+                if success_status == WrapperStatus.COMPLETED:
+                    set_fields["completed_at"] = datetime.utcnow()
                 await db.generated_wrappers.update_one(
                     {"wrapper_id": wrapper_id},
                     {
-                        "$set": {"status": WrapperStatus.COMPLETED.value},
+                        "$set": set_fields,
                         "$push": {
                             "execution_log": f"Executed successfully at {datetime.utcnow()}"
                         },
@@ -286,6 +400,13 @@ class WrapperService:
         """Process wrapper creation task - this runs in the consumer"""
         wrapper_id = message_data["wrapper_id"]
 
+        # The consumer handles messages sequentially in one long-lived task, so
+        # reset the sticky-model contextvars up front — otherwise a previous
+        # API wrapper's daily-quota exhaustion state could leak into this one
+        # (notably the CSV/XLSX branch, which skips generate_wrapper but still
+        # spawns the translation sidecar that reads this state).
+        reset_model_selection_state()
+
         try:
             logger.info(f"Processing wrapper creation {wrapper_id}")
 
@@ -348,6 +469,69 @@ class WrapperService:
                     wrapper.source_type.value,
                     wrapper.metadata.periodicity,
                 )
+            elif wrapper.source_type == SourceType.API:
+                # Probe the endpoint: if it's a flat list of records with a
+                # parseable date + numeric value, wrap it deterministically (no
+                # AI, no Gemini credits). Otherwise fall back to AI.
+                _append_generation_log(
+                    wrapper_id,
+                    "Inspecting API endpoint to detect its data shape…",
+                    reset=True,
+                )
+                mapping = await _probe_api_source(wrapper.source_config)
+                if isinstance(mapping, dict):
+                    # Probe succeeded: persist the detected mapping so the
+                    # executed wrapper and any previews read the same fields.
+                    await db.generated_wrappers.update_one(
+                        {"wrapper_id": wrapper_id},
+                        {"$set": {
+                            "source_config.data_path": mapping.get("data_path", ""),
+                            "source_config.date_field": mapping.get("date_field"),
+                            "source_config.value_field": mapping.get("value_field"),
+                            "updated_at": datetime.utcnow(),
+                        }},
+                    )
+                    try:
+                        wrapper.source_config.data_path = mapping.get("data_path", "")
+                        wrapper.source_config.date_field = mapping.get("date_field")
+                        wrapper.source_config.value_field = mapping.get("value_field")
+                    except (AttributeError, ValueError):
+                        pass
+                    _append_generation_log(
+                        wrapper_id,
+                        f"API shape detected (records at "
+                        f"'{mapping.get('data_path') or '<root>'}', "
+                        f"date='{mapping.get('date_field')}', "
+                        f"value='{mapping.get('value_field')}'). "
+                        f"Building deterministic wrapper (no AI)…",
+                    )
+                    generated_code = self.generator.prompt_manager.get_api_wrapper(
+                        wrapper.metadata.periodicity,
+                    )
+                elif mapping == _PROBE_DEFER:
+                    # Source API is rate-limiting the probe — build the
+                    # deterministic wrapper anyway; it detects the fields at
+                    # runtime (with its own 429 backoff). No AI, no credits.
+                    _append_generation_log(
+                        wrapper_id,
+                        "API endpoint is rate-limiting; building deterministic "
+                        "wrapper (no AI) — it will detect the fields when it runs…",
+                    )
+                    generated_code = self.generator.prompt_manager.get_api_wrapper(
+                        wrapper.metadata.periodicity,
+                    )
+                else:
+                    _append_generation_log(
+                        wrapper_id,
+                        "API shape not auto-detectable — generating wrapper code "
+                        "with AI… this can take up to a minute.",
+                    )
+                    generated_code = await self.generator.generate_wrapper(
+                        wrapper.metadata,
+                        wrapper.source_config,
+                        wrapper.source_type.value,
+                        wrapper_id,
+                    )
             else:
                 _append_generation_log(
                     wrapper_id,
@@ -1125,6 +1309,7 @@ def create_wrapper_service() -> WrapperService:
         fallback_models=[
             m.strip() for m in settings.GEMINI_FALLBACK_MODELS.split(",") if m.strip()
         ],
+        max_tool_calls=settings.WRAPPER_MAX_TOOL_CALLS,
     )
 
     return WrapperService(runner=runner, generator=generator)
