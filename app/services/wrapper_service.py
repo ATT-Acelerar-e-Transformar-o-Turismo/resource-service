@@ -124,7 +124,9 @@ async def _probe_api_source(source_config):
         )
         return _PROBE_DEFER
     except Exception as e:  # network / non-JSON / HTTP error → fall back to AI
-        logger.info(f"API probe request failed ({type(e).__name__}: {e}); will use AI generation")
+        # Exception text may embed the full URL (query params can carry API
+        # keys) — log only the exception type.
+        logger.info(f"API probe request failed ({type(e).__name__}); will use AI generation")
         return None
     try:
         return detect_mapping(
@@ -134,7 +136,7 @@ async def _probe_api_source(source_config):
             value_field=cfg.get("value_field"),
         )
     except Exception as e:
-        logger.info(f"API auto-detection failed ({type(e).__name__}: {e}); will use AI generation")
+        logger.info(f"API auto-detection failed ({type(e).__name__}); will use AI generation")
         return None
 
 
