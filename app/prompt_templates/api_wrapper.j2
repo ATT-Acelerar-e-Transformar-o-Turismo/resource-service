@@ -1,0 +1,205 @@
+import asyncio
+import json
+import os
+import sys
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import requests
+
+from utils import (
+    mask_credentials,
+    MessageQueueSender,
+    get_interval_from_periodicity,
+    ContinuousExecutor,
+    HistoricalFetchResult,
+)
+from api_extract import detect_mapping, extract_points, find_records, detect_fields
+
+
+# Deterministic API wrapper (no AI). Used for endpoints whose response is a flat
+# list of records with a parseable date field and a numeric value field — the
+# common case. The field mapping (data_path / date_field / value_field) is
+# resolved once at generation time by the resource-service probe and stored in
+# source_config; we re-detect at runtime only if it's missing, so the wrapper is
+# self-healing. Timestamps keep full precision, so intraday readings never
+# collapse onto one x.
+class ATTWrapper:
+    def __init__(self, wrapper_id: str, source_config: dict = None, rabbitmq_url: str = None):
+        # wrapper_id is always a STRING (UUID), never an integer.
+        self.wrapper_id = wrapper_id
+        self.rabbitmq_url = rabbitmq_url or os.getenv('AMQP_URL', 'amqp://guest:guest@localhost/')
+        self.source_type = "API"
+        self.periodicity = "{{ periodicity }}"
+        self.source_config = source_config or {}
+
+        cfg = self.source_config
+        self.url = cfg.get('location')
+        if not self.url:
+            raise ValueError("API source_config is missing 'location' (endpoint URL)")
+        try:
+            self.timeout = int(cfg.get('timeout_seconds') or 30)
+        except (TypeError, ValueError):
+            self.timeout = 30
+
+        self.headers = self._build_headers()
+        self.auth = self._build_auth()
+        self.params = dict(cfg.get('query_params') or {})
+
+        # Field mapping resolved at generation time; may be re-detected at runtime.
+        self.data_path = cfg.get('data_path')
+        self.date_field = cfg.get('date_field')
+        self.value_field = cfg.get('value_field')
+        self._mapping_logged = False
+
+        self.metadata = {
+            "source_type": self.source_type,
+            "periodicity": self.periodicity,
+            "wrapper_version": "deterministic-api-1.0",
+        }
+
+        self.message_sender = MessageQueueSender(self.wrapper_id, self.rabbitmq_url, self.metadata)
+        self.continuous_executor = ContinuousExecutor(self.wrapper_id, self.get_interval_seconds())
+
+    def _build_headers(self) -> Dict[str, str]:
+        cfg = self.source_config
+        headers = dict(cfg.get('custom_headers') or {})
+        auth_type = (cfg.get('auth_type') or 'none').lower()
+        if auth_type == 'api_key' and cfg.get('api_key'):
+            header_name = cfg.get('api_key_header') or 'X-API-Key'
+            headers[header_name] = cfg['api_key']
+        elif auth_type == 'bearer' and cfg.get('bearer_token'):
+            headers['Authorization'] = f"Bearer {cfg['bearer_token']}"
+        return headers
+
+    def _build_auth(self):
+        cfg = self.source_config
+        if (cfg.get('auth_type') or 'none').lower() == 'basic' and cfg.get('username'):
+            return (cfg.get('username'), cfg.get('password') or '')
+        return None
+
+    def get_interval_seconds(self) -> int:
+        return get_interval_from_periodicity(self.periodicity)
+
+    def _fetch_raw(self) -> Any:
+        """GET the endpoint and return parsed JSON. Retries briefly on 429."""
+        attempts = 0
+        while True:
+            attempts += 1
+            resp = requests.get(
+                self.url, headers=self.headers, params=self.params,
+                auth=self.auth, timeout=self.timeout,
+            )
+            if resp.status_code == 429 and attempts <= 3:
+                retry_after = resp.headers.get('retry-after')
+                try:
+                    delay = float(retry_after) if retry_after else 30.0
+                except ValueError:
+                    delay = 30.0
+                print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: HTTP 429, waiting {delay:.0f}s (attempt {attempts})")
+                import time as _t
+                _t.sleep(min(delay, 120))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+
+    def _ensure_mapping(self, payload: Any):
+        """Resolve data_path/date_field/value_field if not already configured."""
+        if self.data_path is not None and self.date_field and self.value_field:
+            return
+        mapping = detect_mapping(
+            payload,
+            preferred_path=self.data_path,
+            date_field=self.date_field,
+            value_field=self.value_field,
+        )
+        if not mapping:
+            # Best-effort partial detection so we still try to emit something.
+            path, records = find_records(payload, self.data_path)
+            df, vf = detect_fields(records, self.date_field, self.value_field)
+            mapping = {"data_path": path or "", "date_field": df, "value_field": vf}
+        self.data_path = mapping.get("data_path") or ""
+        self.date_field = mapping.get("date_field")
+        self.value_field = mapping.get("value_field")
+
+    async def fetch_external_data(self) -> List[Dict[str, Any]]:
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Fetching from {self.url}")
+        payload = self._fetch_raw()
+        self._ensure_mapping(payload)
+        if not self.date_field or not self.value_field:
+            raise ValueError(
+                "Could not determine date/value fields in the API response — "
+                "configure date_field/value_field for this source."
+            )
+        if not self._mapping_logged:
+            print(
+                f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: "
+                f"using data_path='{self.data_path}', date_field='{self.date_field}', "
+                f"value_field='{self.value_field}'"
+            )
+            self._mapping_logged = True
+        points = extract_points(payload, self.data_path, self.date_field, self.value_field)
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: extracted {len(points)} data points")
+        return points
+
+    async def fetch_date_range(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
+        """Fetch all and filter to the [start, end] window. Simple APIs return
+        the full series in one call; the continuous executor uses this with a
+        high-water mark to pick up only new readings."""
+        points = await self.fetch_external_data()
+        out = []
+        for p in points:
+            try:
+                dt = datetime.fromisoformat(p["x"])
+            except (ValueError, KeyError):
+                continue
+            if start_date <= dt <= end_date:
+                out.append(p)
+        return out
+
+    async def fetch_historical(self) -> "HistoricalFetchResult":
+        """One full fetch of all available data, sent in one (chunked) batch."""
+        points = await self.fetch_external_data()
+        result = HistoricalFetchResult()
+        if points:
+            await self.send_to_queue(points)
+            result.update(points)
+        return result
+
+    async def send_to_queue(self, data_points: List[Dict[str, Any]]):
+        if not data_points:
+            return
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Publishing {len(data_points)} data points...")
+        await self.message_sender.send_to_queue(data_points)
+        print(f"[{datetime.now().isoformat()}] Wrapper {self.wrapper_id}: Published to queue")
+
+    async def run_once(self):
+        points = await self.fetch_external_data()
+        if points:
+            await self.send_to_queue(points)
+        else:
+            raise Exception("No data points were fetched from the source")
+
+    async def run_continuous(self):
+        await self.continuous_executor.run_continuous(
+            run_once_func=self.run_once,
+            fetch_historical_func=self.fetch_historical,
+            fetch_date_range_func=self.fetch_date_range,
+            send_to_queue_func=self.send_to_queue,
+            source_type="API",
+        )
+
+
+if __name__ == "__main__":
+    print(f"[{datetime.now().isoformat()}] Wrapper starting with args: {sys.argv}")
+    if len(sys.argv) < 3:
+        raise ValueError("wrapper_id and source_config are required as arguments")
+    wrapper_id = sys.argv[1]
+    try:
+        source_config = json.loads(sys.argv[2])
+    except json.JSONDecodeError:
+        raise ValueError("source_config must be valid JSON")
+
+    wrapper = ATTWrapper(wrapper_id, source_config=source_config)
+    print(f"API source detected - running continuously")
+    asyncio.run(wrapper.run_continuous())
